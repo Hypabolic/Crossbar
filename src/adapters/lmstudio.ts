@@ -112,6 +112,7 @@ function hasLmsDiscriminator(json: unknown): boolean {
 function toDescriptor(m: LmsModelEntry): ModelDescriptor {
   const isEmbeddings = m.type === "embeddings";
   const isVlm = m.type === "vlm";
+  const isLoaded = m.state === "loaded";
 
   const input: ("text" | "image")[] = ["text"];
   if (isVlm) input.push("image");
@@ -121,11 +122,24 @@ function toDescriptor(m: LmsModelEntry): ModelDescriptor {
     name: m.id,
     input,
     embeddings: isEmbeddings,
-    loaded: m.state === "loaded",
+    loaded: isLoaded,
     raw: m,
   };
-  if (m.max_context_length !== undefined) {
-    desc.contextWindow = m.max_context_length;
+
+  // Context window: LM Studio reports both the model ceiling (`max_context_length`)
+  // and the window the model was actually loaded with (`loaded_context_length`),
+  // which is frequently configured well below the ceiling (e.g. a 128k model loaded
+  // at 4096). Register the OPERATIVE window so Pi budgets against what the server
+  // will really accept: prefer the loaded length when the model is resident (and
+  // non-zero), otherwise fall back to the model max. `loaded_context_length` is 0 or
+  // absent while the model is not loaded, so it never masks the ceiling in that case.
+  const loadedCtx =
+    isLoaded && typeof m.loaded_context_length === "number" && m.loaded_context_length > 0
+      ? m.loaded_context_length
+      : undefined;
+  const ctx = loadedCtx ?? m.max_context_length;
+  if (ctx !== undefined) {
+    desc.contextWindow = ctx;
   }
   return desc;
 }
@@ -307,9 +321,18 @@ class LmStudioAdapter implements BackendAdapter {
       name: model.name,
       reasoning: model.reasoning ?? false,
       input: model.input.length > 0 ? (model.input as ("text" | "image")[]) : ["text"],
+      // Local inference is free, so per-token COSTS are zero. The cache-hit token
+      // COUNTS still flow and are worth recording: LM Studio's OpenAI-compatible
+      // responses report `usage.prompt_tokens_details.cached_tokens`, which Pi maps to
+      // `Usage.cacheRead` and surfaces in the TUI regardless of cost. Keep usage
+      // reporting on during streaming so those automatic-prefix-cache hits are
+      // recorded. We intentionally do NOT set `cacheControlFormat`: LM Studio (llama.cpp
+      // engine) caches matching prefixes automatically, so injecting Anthropic-style
+      // `cache_control` markers would be wrong for this OpenAI-completions backend.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: model.contextWindow ?? 8192,
       maxTokens: model.maxTokens ?? 4096,
+      compat: { supportsUsageInStreaming: true },
     };
   }
 
