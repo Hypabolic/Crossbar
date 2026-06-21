@@ -140,9 +140,15 @@ class GenericAdapter implements BackendAdapter {
       name: model.name,
       reasoning: model.reasoning ?? false,
       input: model.input.length > 0 ? model.input : ["text"],
+      // Local inference is free → per-token costs are zero, but cache-hit token
+      // COUNTS still matter: Pi maps any `usage.prompt_tokens_details.cached_tokens` the
+      // backend reports to `Usage.cacheRead` and displays it regardless of cost. The
+      // flag only asks for usage in streaming (never fabricates), so it is safe even for
+      // unknown OpenAI-compatible servers that may not report cache hits.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
       maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS,
+      compat: { supportsUsageInStreaming: true },
     };
   }
 
