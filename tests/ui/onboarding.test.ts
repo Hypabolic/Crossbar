@@ -191,27 +191,33 @@ describe("buildDiscoveredItems", () => {
 // ─── buildManageItems ─────────────────────────────────────────────────────────
 
 describe("buildManageItems", () => {
-  it("offers every capability action plus Remove for a full-capability backend", () => {
-    const values = buildManageItems(ollamaAdapter).map((i) => i.value);
+  it("offers every capability action plus Disable + Remove for an enabled full-capability backend", () => {
+    const values = buildManageItems(ollamaAdapter, true).map((i) => i.value);
     expect(values).toEqual(
-      expect.arrayContaining(["switch", "load", "unload", "introspect", "remove"]),
+      expect.arrayContaining(["switch", "load", "unload", "introspect", "disable", "remove"]),
     );
   });
 
-  it("always includes a Remove action, even for capability-less backends", () => {
+  it("offers Disable/Remove (only) for an enabled capability-less backend", () => {
     for (const adapter of [vllmAdapter, openaiAdapter, anthropicAdapter, genericAdapter]) {
-      const values = buildManageItems(adapter).map((i) => i.value);
-      expect(values).toEqual(["remove"]);
+      const values = buildManageItems(adapter, true).map((i) => i.value);
+      expect(values).toEqual(["disable", "remove"]);
     }
   });
 
+  it("shows Enable instead of Disable when the server is disabled", () => {
+    const values = buildManageItems(vllmAdapter, false).map((i) => i.value);
+    expect(values).toEqual(["enable", "remove"]);
+    expect(values).not.toContain("disable");
+  });
+
   it("puts Remove last in the list", () => {
-    const items = buildManageItems(ollamaAdapter);
+    const items = buildManageItems(ollamaAdapter, true);
     expect(items[items.length - 1]!.value).toBe("remove");
   });
 
   it("gives every item a non-empty label and value", () => {
-    for (const item of buildManageItems(lmstudioAdapter)) {
+    for (const item of buildManageItems(lmstudioAdapter, true)) {
       expect(item.label.length).toBeGreaterThan(0);
       expect(item.value.length).toBeGreaterThan(0);
     }
