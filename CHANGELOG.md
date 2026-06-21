@@ -3,6 +3,18 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.3.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.3.0) — 2026-06-21
+
+### Features
+- Enable/disable action, LAN discovery wiring, doc sync (#9) ([9db6c8b](https://github.com/Hypabolic/Crossbar/commit/9db6c8bd91d36d4dae176e2d52cdde18eff56e66))
+- Wire health poll, model refresh, and shutdown cleanup (#8) ([9a2706f](https://github.com/Hypabolic/Crossbar/commit/9a2706f5bb9c017ae913c9a140c23250c309c523))
+
+### Documentation
+- V0.2.0 [skip ci] ([bcae342](https://github.com/Hypabolic/Crossbar/commit/bcae342392983a09df6dc117cd057922bae2b582))
+
+### Build & CI
+- Correct git-cliff notes per trigger; link hypabolic.com (#7) ([4515950](https://github.com/Hypabolic/Crossbar/commit/45159500c59085a50afb8f654ab68e87fb0bfec2))
+
 ## [0.2.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.2.0) — 2026-06-21
 
 ### Features
