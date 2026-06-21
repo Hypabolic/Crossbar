@@ -108,16 +108,17 @@ conformance suite (`tests/conformance/`) validates every adapter against it, and
 
 - **CI** (`.github/workflows/ci.yml`) runs `tsc --noEmit` + the full test suite on every push and PR
   (Node 22 & 24).
-- **Releases** (`.github/workflows/release.yml`) publish to npm with [provenance](https://docs.npmjs.com/generating-provenance-statements).
-  Two ways:
+- **Releases** (`.github/workflows/release.yml`) publish to npm via **GitHub→npm OIDC trusted
+  publishing** — no tokens or secrets. [Provenance](https://docs.npmjs.com/generating-provenance-statements)
+  is attached automatically. Two ways:
   1. **Manual** — GitHub → *Actions → Release → Run workflow* → choose `patch` / `minor` / `major`.
      It bumps `package.json`, commits, tags `vX.Y.Z`, and publishes.
   2. **Tag push** — `npm version patch && git push --follow-tags` locally.
 
-  **One-time setup:** add an npm **automation** access token as the repo secret **`NPM_TOKEN`**
-  (Settings → Secrets and variables → Actions). An *automation* token bypasses interactive 2FA/OTP so
-  CI can publish unattended. (Optionally migrate to npm OIDC trusted publishing later — the workflow
-  already requests `id-token: write`.)
+  **One-time setup:** on npmjs.com, add a **Trusted Publisher** for `@hypabolic/crossbar`
+  (*Package settings → Trusted Publisher → GitHub Actions*) pointing at repo **`Hypabolic/Crossbar`**
+  and workflow **`release.yml`**. The workflow authenticates through the OIDC `id-token` it already
+  requests — no `NPM_TOKEN` needed.
 
 <!-- TODO: add an onboarding demo GIF (docs/onboarding.gif) recorded against a live Ollama + LM Studio. -->
 

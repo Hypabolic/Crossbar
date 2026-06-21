@@ -40,6 +40,10 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: npm
 
+      # Trusted publishing (OIDC) requires npm >= 11.5.1.
+      - name: Ensure npm supports OIDC trusted publishing
+        run: npm install -g npm@latest
+
       - name: Install (clean, from lockfile)
         run: npm ci
 
@@ -70,7 +74,8 @@ jobs:
             exit 1
           fi
 
-      - name: Publish to npm (public, with provenance)
-        run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # No NODE_AUTH_TOKEN: authentication is via GitHub→npm OIDC trusted publishing.
+      # Configure the trusted publisher for @hypabolic/crossbar on npmjs.com (repo
+      # Hypabolic/Crossbar, workflow release.yml). Provenance is generated automatically.
+      - name: Publish to npm (public, OIDC trusted publishing)
+        run: npm publish --access public
