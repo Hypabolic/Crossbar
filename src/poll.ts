@@ -45,7 +45,9 @@ export function modelsChanged(
 
 /**
  * Poll a single server: refresh health + models, re-register on change, and write
- * the results to the registry cache. Returns the observed health state. Never throws.
+ * the results to the registry cache. Returns the observed health state. The health
+ * and model probes are caught and reported as `unreachable`; `pollAll` additionally
+ * isolates any per-server rejection so one bad server never aborts the tick.
  */
 export async function pollServer(
   pi: ExtensionAPI,
