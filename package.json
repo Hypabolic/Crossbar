@@ -29,10 +29,12 @@
   "pi": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/Hypabolic/Crossbar/main/docs/onboarding.gif"
   },
   "files": [
     "src",
+    "docs/onboarding.gif",
     "RESEARCH.md",
     "CAPABILITY-MATRIX.md",
     "ARCHITECTURE.md",
@@ -42,7 +44,9 @@
   "scripts": {
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "demo:lmstudio": "node scripts/fake-lmstudio.mjs",
+    "demo:gif": "node scripts/gen-onboarding-gif.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "0.79.9",
