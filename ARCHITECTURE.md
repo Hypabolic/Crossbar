@@ -1,8 +1,12 @@
-# Crossbar — Architecture & Frozen Contract (Phase 1)
+# Crossbar — Architecture & Frozen Contract
 
-**Status:** Interface frozen pending sign-off · **Date:** 2026-06-21 · Companion to `RESEARCH.md`,
-`CAPABILITY-MATRIX.md`. The contract under `src/core/` is the **single source of truth**. Phase 2
-fan-out targets it and nothing else. Typechecked against Pi `0.79.9` (`tsc --noEmit` → clean).
+**Status:** Implemented (Phases 1–3 landed) · **Date:** 2026-06-21 · Companion to `RESEARCH.md`,
+`CAPABILITY-MATRIX.md`, `docs/tokens-per-second.md`. The contract under `src/core/` is the **single
+source of truth**. Typechecked against Pi `0.79.9` (`tsc --noEmit` → clean).
+
+> The sections below describe the design; everything here is now wired end-to-end (discovery, registry,
+> adapters, provider shim, onboarding + manage overlay, loaded widget, and the health poll). Where a
+> behaviour was once aspirational it is now live — notes call out anything still intentionally deferred.
 
 ```
 discovery engine ──┐
@@ -18,7 +22,8 @@ loaded-model widget ────────────────────
 
 ```
 src/
-  index.ts                  # extension entry: registers /crossbar, wires session_start (STUB today)
+  index.ts                  # extension entry: /crossbar + /local, session_start/shutdown, health poll
+  poll.ts                   # per-tick health() + model refresh + re-register-on-change orchestration
   core/                     # FROZEN CONTRACT — do not change without bumping CONTRACT_VERSION
     capability.ts           # Capability enum, AuthMode, BackendKind
     types.ts                # Probe, DiscoveredServer, ModelDescriptor, LoadedState, ServerRecord, PiModelEntry
@@ -100,16 +105,22 @@ register(record):
 - **Secrets:** `ctx.modelRegistry.authStorage` (`auth.json`, `0600`), keyed by `record.id`.
 - **IDs:** stable, derived from `kind + host + port` (e.g. `crossbar-ollama-localhost-11434`) so a server
   keeps its id and key across restarts. (`registry/ids.ts`)
-- **Health poll:** interval loop started in `session_start`, stopped in `session_shutdown` (per Pi's
-  long-lived-resource rule). Updates health, refreshes model cache, drives the loaded widget. On
-  `unreachable`, keep the registration but mark degraded; show last-known models/loaded.
-- **Lifecycle:** `session_start` → load `crossbar.json` → (if enabled) run auto-discovery →
-  register all enabled+reachable servers → start poll. `session_shutdown` → stop poll.
+- **Health poll (`poll.ts`):** interval loop started in `session_start` (UI sessions only, so a
+  long-lived timer never keeps a one-shot/headless run alive), stopped in `session_shutdown`. Each tick
+  per enabled server: call `adapter.health()` and record the state (`registry.setHealth`), refresh the
+  model list, and **re-register only when the model set changed** (`reRegisterServer`). The loaded widget
+  persists each live introspection into the cache so the `last-known` fallback has data when a server
+  drops offline, and renders a degraded/unreachable/auth indicator from the polled health.
+- **Lifecycle:** `session_start` → load `crossbar.json` (+ `settings`) → register saved enabled servers →
+  run auto-discovery (localhost, plus LAN when opted in) → install widget → poll. `session_shutdown` →
+  stop poll, **unregister every provider**, dispose widget.
 
 ## 5. Discovery engine (`discovery/`)
 
-- **Default scope: localhost only.** Probe ports `[11434,1234,8080,8000,5000,5001,1337]` on `127.0.0.1`.
-  LAN host-range probing is opt-in via `CrossbarSettings.lanDiscovery` (no mDNS exists for any backend).
+- **Default scope: localhost only.** Probe ports `[11434,1234,8080,8000,5000,5001,1337]` on `127.0.0.1`
+  (override with `CrossbarSettings.probePorts`). LAN host-range probing is opt-in and **wired**: set
+  `CrossbarSettings.lanDiscovery: true` and list `lanHosts` (IPs/hostnames — no mDNS exists for any
+  backend); `discoverLan` probes `lanHosts × probePorts` and merges/de-dupes into the localhost results.
 - **Per origin:** run the probe-order fingerprint chain (CAPABILITY-MATRIX §"probe order"); pick the
   highest-confidence adapter; fall back to `openai-generic` when only `/v1/models` matches.
 - **Short timeouts** (e.g. 600ms) and bounded concurrency; a refused port returns `status:0` fast.
@@ -123,29 +134,43 @@ Overlay via `ctx.ui.custom<T>(factory, { overlay:true, overlayOptions })` using 
 
 ```
 /crossbar →
-  [Discovered]  Ollama (localhost:11434)  ✓ healthy
-                LM Studio (localhost:1234) ✓ healthy
-  [Manual add]  + Add server…  → input URL → optional API key (no-auth toggle) → Test connection
-  → on select/add: fingerprint → health → listModels → pick default model → save (registry + auth.json)
+  [Discovered]   Ollama (localhost:11434)  ✓ healthy
+                 LM Studio (localhost:1234) (added)
+  [Registered]   vLLM (192.168.1.5:8000)   (added · not discovered)   ← offline servers stay manageable
+  [Manual add]   + Add server…  → input URL → optional API key (no-auth toggle) → Test connection
+  → new server:  fingerprint → health → listModels → pick default model → save (registry + auth.json)
+  → added server: Manage overlay (capability-filtered)
 ```
 
-- Capability-driven: hide "switch model" when `!supports(SwitchModel)`; show load/unload only when
-  `LoadUnload`; show a no-auth toggle always, key entry only when needed.
+- **New server** path: fingerprint → list models → pick default → save.
+- **Already-registered** path opens the **Manage overlay** (`buildManageItems` → `capabilityActions`):
+  switch / load / unload / inspect (capability-gated) · **enable/disable** (toggles registration without
+  forgetting the server) · **remove** (unregisters + deletes the key). Capability-less backends (vLLM,
+  OpenAI, Anthropic, generic) show only enable/disable + remove.
+- Capability-driven: actions are hidden via the `canSwitch`/`canLoadUnload`/`canIntrospect` guards.
 - Test-connection uses the same `Probe` + adapter `health`/`listModels` as production.
 - Cloud keys (OpenAI/Anthropic) can still be entered via stock `/login`; Crossbar's registered models
   surface in `/model` regardless.
 
 ## 7. Loaded-model widget (`ui/loaded-widget.ts`)
 
-- `ctx.ui.setStatus("crossbar-loaded", theme.fg("accent", "● <server>:<model>"))`, refreshed from the
-  health poll's `introspectLoaded` and from the `model_select` event.
-- When `!supports(IntrospectLoaded)` (OpenAI, Anthropic, vLLM, llamafile) → show **last-known**
-  selection from `ServerRecord.lastKnownLoaded`; never claim live state we can't read (`source` field).
+- `ctx.ui.setStatus("crossbar-loaded", …)`, refreshed by the health poll and on `model_select`.
+- Live introspection renders `● <server>:<model>`; the snapshot is persisted to the cache so a later
+  drop shows `◷ <server>:<model> (last-known)` instead of going blank.
+- When `!supports(IntrospectLoaded)` (OpenAI, Anthropic, vLLM, llamafile) → show **last-known** from
+  `ServerRecord.lastKnownLoaded`; never claim live state we can't read (`source` field).
+- Unhealthy servers render `✕ <server>:unreachable|degraded|auth` from the polled `HealthState`,
+  taking precedence over a stale loaded list.
+
+> **Tokens/sec:** not shown. The provider-reported decode rate (LM Studio `stats.tokens_per_second`,
+> llama.cpp `timings.predicted_per_second`, Ollama `eval_*`) is **not reachable** from an extension —
+> Pi is the inference client and its parser drops those non-standard fields. See
+> `docs/tokens-per-second.md` for the upstream-Pi change that would surface it.
 
 ## 8. Conformance suite (`tests/conformance/`)
 
-One parameterized suite runs against **every** adapter using a fake `Probe` backed by per-backend
-fixtures. Required cases:
+One parameterized suite (`run-conformance.ts`) runs against **every** adapter using a fake `Probe`
+(`fake-probe.ts`) backed by per-adapter fixtures (`tests/adapters/<kind>.fixture.ts`). Required cases:
 
 - fingerprint: positive, negative (other backend's response), ambiguous-port disambiguation.
 - listModels: normal, empty, embeddings filtered, missing-caps defaults applied.
@@ -156,13 +181,18 @@ fixtures. Required cases:
 
 Discovery validated on **zero / one / many** servers (Phase 3 hardening).
 
-## 9. Phase 2 waves (contract-driven fan-out — nothing starts before sign-off)
+## 9. Build history (all landed)
 
-- **Wave A (parallel):** conformance harness + fixtures · discovery engine + probe · registry +
-  persistence + id gen.
-- **Wave B (parallel, one adapter per agent):** ollama · lmstudio · llamacpp+llamaswap · vllm ·
-  openai+anthropic · generic. Each lands with its fixtures and passes conformance before merge.
-- **Wave C:** provider shim + `/crossbar` onboarding overlay + loaded widget; full integration; green
-  conformance across all adapters.
+- **Wave A:** conformance harness + fixtures · discovery engine + probe · registry + persistence + id gen.
+- **Wave B (one adapter per kind):** ollama · lmstudio · llamacpp · llamaswap · vllm · openai · anthropic ·
+  generic — each with fixtures, green against conformance.
+- **Wave C:** provider shim + `/crossbar` onboarding/manage overlay + loaded widget.
+- **Orchestration:** `poll.ts` health/model-refresh loop, last-known-loaded caching, LAN discovery,
+  enable/disable, shutdown unregistration.
 
-After each wave: reconvene, integrate, run conformance against every adapter.
+### Deferred / not built
+- **Tokens/sec display** — blocked on upstream Pi (see `docs/tokens-per-second.md`).
+- **Per-model caps** for LM Studio / llama.cpp / vLLM are largely defaulted (those APIs don't expose
+  reasoning/tools/max-output); only context + vision are derived where available.
+- **Live VRAM/TTL display** — `LoadedModelInfo.vramBytes`/`expiresAt` are collected by introspection but
+  not yet surfaced in the widget.

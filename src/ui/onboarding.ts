@@ -28,7 +28,7 @@ import type { DiscoveredServer, LoadedState, ModelDescriptor, ServerRecord } fro
 import type { ServerRegistry } from "../registry/registry.ts";
 import { serverId } from "../registry/ids.ts";
 import { adapterFor } from "../adapters/index.ts";
-import { unregisterServer } from "../shim/provider-shim.ts";
+import { registerServer, unregisterServer } from "../shim/provider-shim.ts";
 import { createProbe } from "../discovery/probe.ts";
 
 // ─── Pure helpers ────────────────────────────────────────────────────────────
@@ -180,22 +180,30 @@ const ACTION_DESCRIPTIONS: Record<string, string> = {
   load: "Load a model into memory",
   unload: "Evict a loaded model from memory",
   introspect: "Show which models are currently loaded",
+  enable: "Register its models with Pi again",
+  disable: "Stop registering its models (keeps the server saved)",
   remove: "Forget this server and delete its stored key",
 };
 
 /**
  * Build the manage-overlay action list for an already-registered server: the
- * adapter's capability-filtered actions (switch / load / unload / introspect) plus
- * a "Remove server" action that is always available. Backends without any local
- * capabilities (vLLM, OpenAI, Anthropic, generic) show only "Remove server".
+ * adapter's capability-filtered actions (switch / load / unload / introspect),
+ * an enable/disable toggle (driven by `enabled`), and a "Remove server" action.
+ * Backends without any local capabilities (vLLM, OpenAI, Anthropic, generic) show
+ * only the enable/disable toggle and "Remove server".
  */
-export function buildManageItems(adapter: BackendAdapter): SelectItem[] {
+export function buildManageItems(adapter: BackendAdapter, enabled: boolean): SelectItem[] {
   const items: SelectItem[] = capabilityActions(adapter).map((a) => {
     const item: SelectItem = { value: a.value, label: a.label };
     const desc = ACTION_DESCRIPTIONS[a.value];
     if (desc !== undefined) item.description = desc;
     return item;
   });
+  items.push(
+    enabled
+      ? { value: "disable", label: "Disable server", description: ACTION_DESCRIPTIONS["disable"]! }
+      : { value: "enable", label: "Enable server", description: ACTION_DESCRIPTIONS["enable"]! },
+  );
   items.push({
     value: "remove",
     label: "Remove server",
@@ -433,6 +441,32 @@ async function performIntrospect(
   ctx.ui.notify(`Crossbar: ${record.label} loaded — ${summary}`, "info");
 }
 
+/**
+ * Toggle a server's enabled state. Disabling unregisters its Pi provider (its
+ * models leave `/model`) but keeps the saved record; enabling re-registers it.
+ */
+async function performToggleEnabled(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  registry: ServerRegistry,
+  record: ServerRecord,
+): Promise<void> {
+  const next = !record.enabled;
+  await registry.setEnabled(record.id, next);
+  if (!next) {
+    unregisterServer(pi, record);
+    ctx.ui.notify(`Crossbar: ${record.label} disabled — removed from /model.`, "info");
+    return;
+  }
+  const models = await fetchModels(ctx, registry, record);
+  if (models && models.length > 0) {
+    await registerServer(pi, registry, record, models);
+    ctx.ui.notify(`Crossbar: ${record.label} enabled — ${models.length} models in /model.`, "info");
+  } else {
+    ctx.ui.notify(`Crossbar: ${record.label} enabled (no models reachable right now).`, "warning");
+  }
+}
+
 /** Confirm and remove a server from the registry, auth.json, and Pi. */
 async function performRemove(
   pi: ExtensionAPI,
@@ -462,8 +496,8 @@ export async function openServerActions(
 
   const choice = await selectOverlay(
     ctx,
-    `Manage — ${record.label}`,
-    buildManageItems(adapter),
+    `Manage — ${record.label}${record.enabled ? "" : " (disabled)"}`,
+    buildManageItems(adapter, record.enabled),
     "↑↓ navigate · Enter select · Esc close",
   );
   if (!choice) return;
@@ -480,6 +514,10 @@ export async function openServerActions(
       break;
     case "introspect":
       await performIntrospect(ctx, registry, record);
+      break;
+    case "enable":
+    case "disable":
+      await performToggleEnabled(pi, ctx, registry, record);
       break;
     case "remove":
       await performRemove(pi, ctx, registry, record);

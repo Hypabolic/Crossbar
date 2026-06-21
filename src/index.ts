@@ -18,7 +18,7 @@ import type {
 
 import type { CrossbarSettings, DiscoveredServer, ModelDescriptor, ServerRecord } from "./core/index.ts";
 import { adapterFor, DISCOVERY_ADAPTERS } from "./adapters/index.ts";
-import { discoverLocalhost } from "./discovery/engine.ts";
+import { discoverLan, discoverLocalhost } from "./discovery/engine.ts";
 import { createProbe } from "./discovery/probe.ts";
 import { pollAll } from "./poll.ts";
 import { loadConfig, saveConfig } from "./registry/persistence.ts";
@@ -48,16 +48,25 @@ export default function crossbar(pi: ExtensionAPI): void {
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let settings: CrossbarSettings | undefined;
 
-  // Discovery honours CrossbarSettings: custom probe ports, and (opt-in) LAN range
-  // is reserved for a future toggle. Reads `settings` at call time so it picks up
-  // the config loaded in session_start.
-  const discover = (): Promise<DiscoveredServer[]> =>
-    discoverLocalhost(
-      [...DISCOVERY_ADAPTERS],
+  // Discovery honours CrossbarSettings: custom probe ports always, plus opt-in LAN
+  // host probing (lanDiscovery + lanHosts). Reads `settings` at call time so it
+  // picks up the config loaded in session_start.
+  const discover = async (): Promise<DiscoveredServer[]> => {
+    const adapters = [...DISCOVERY_ADAPTERS];
+    const opts =
       settings?.probePorts && settings.probePorts.length > 0
         ? { ports: settings.probePorts }
-        : undefined,
-    );
+        : undefined;
+
+    const local = await discoverLocalhost(adapters, opts);
+    if (!settings?.lanDiscovery || !settings.lanHosts || settings.lanHosts.length === 0) {
+      return local;
+    }
+    // Merge LAN results, de-duplicating against localhost by origin.
+    const lan = await discoverLan(adapters, settings.lanHosts, opts);
+    const seen = new Set(local.map((s) => s.baseUrl));
+    return [...local, ...lan.filter((s) => !seen.has(s.baseUrl))];
+  };
 
   /** Best-effort: refresh a server's model list and (re)register it with Pi. Returns models used. */
   async function refreshAndRegister(reg: ServerRegistry, record: ServerRecord): Promise<number> {

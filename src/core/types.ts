@@ -149,6 +149,12 @@ export interface ServerRecord {
 export interface CrossbarSettings {
   /** Opt-in LAN host-range probing (default false — localhost only). */
   lanDiscovery?: boolean;
+  /**
+   * Explicit hosts (IPs or hostnames) to probe when `lanDiscovery` is enabled.
+   * There is no mDNS for these backends, so the host list must be supplied here.
+   * Each host is probed across {@link probePorts} (or the defaults).
+   */
+  lanHosts?: string[];
   /** Override the default localhost probe ports. */
   probePorts?: number[];
 }
