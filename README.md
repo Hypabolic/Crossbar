@@ -3,7 +3,7 @@
 [![CI](https://github.com/Hypabolic/Crossbar/actions/workflows/ci.yml/badge.svg)](https://github.com/Hypabolic/Crossbar/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@hypabolic/crossbar)](https://www.npmjs.com/package/@hypabolic/crossbar)
 
-**The local/self-hosted inference connector Pi should have shipped with.**
+**Effortless local & self-hosted model backends for the Pi coding agent.**
 
 Crossbar is an extension for the [Pi coding agent](https://github.com/earendil-works/pi) that makes
 wiring Pi to *any* local or self-hosted model backend effortless — zero hand-edited JSON, all setup
