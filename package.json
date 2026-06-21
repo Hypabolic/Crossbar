@@ -1,0 +1,53 @@
+{
+  "name": "@hypabolic/crossbar",
+  "version": "0.1.0",
+  "description": "The local/self-hosted inference connector Pi should have shipped with — multi-backend discovery, model switching, and zero-JSON in-TUI onboarding for the Pi coding agent.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Hypabolic",
+  "homepage": "https://github.com/hypabolic/crossbar",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-coding-agent",
+    "llm",
+    "local-llm",
+    "ollama",
+    "lm-studio",
+    "llama.cpp",
+    "llama-swap",
+    "vllm",
+    "openai-compatible"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "files": [
+    "src",
+    "RESEARCH.md",
+    "CAPABILITY-MATRIX.md",
+    "ARCHITECTURE.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "0.79.9",
+    "@earendil-works/pi-tui": "0.79.9",
+    "typebox": "1.2.19"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.79.9",
+    "@earendil-works/pi-tui": "0.79.9",
+    "@types/node": "26.0.0",
+    "typebox": "1.2.19",
+    "typescript": "6.0.3",
+    "vitest": "4.1.9"
+  }
+}
