@@ -16,15 +16,16 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
-import type { DiscoveredServer, ModelDescriptor, ServerRecord } from "./core/index.ts";
+import type { CrossbarSettings, DiscoveredServer, ModelDescriptor, ServerRecord } from "./core/index.ts";
 import { adapterFor, DISCOVERY_ADAPTERS } from "./adapters/index.ts";
 import { discoverLocalhost } from "./discovery/engine.ts";
 import { createProbe } from "./discovery/probe.ts";
+import { pollAll } from "./poll.ts";
 import { loadConfig, saveConfig } from "./registry/persistence.ts";
 import { createPiCredentialStore } from "./registry/pi-credential-store.ts";
 import { serverId } from "./registry/ids.ts";
 import { ServerRegistry } from "./registry/registry.ts";
-import { registerServer } from "./shim/provider-shim.ts";
+import { registerServer, unregisterServer } from "./shim/provider-shim.ts";
 import { openOnboarding } from "./ui/onboarding.ts";
 import { installLoadedWidget, type LoadedWidgetHandle } from "./ui/loaded-widget.ts";
 
@@ -45,8 +46,18 @@ export default function crossbar(pi: ExtensionAPI): void {
   let registry: ServerRegistry | undefined;
   let widget: LoadedWidgetHandle | undefined;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let settings: CrossbarSettings | undefined;
 
-  const discover = (): Promise<DiscoveredServer[]> => discoverLocalhost([...DISCOVERY_ADAPTERS]);
+  // Discovery honours CrossbarSettings: custom probe ports, and (opt-in) LAN range
+  // is reserved for a future toggle. Reads `settings` at call time so it picks up
+  // the config loaded in session_start.
+  const discover = (): Promise<DiscoveredServer[]> =>
+    discoverLocalhost(
+      [...DISCOVERY_ADAPTERS],
+      settings?.probePorts && settings.probePorts.length > 0
+        ? { ports: settings.probePorts }
+        : undefined,
+    );
 
   /** Best-effort: refresh a server's model list and (re)register it with Pi. Returns models used. */
   async function refreshAndRegister(reg: ServerRegistry, record: ServerRecord): Promise<number> {
@@ -74,7 +85,9 @@ export default function crossbar(pi: ExtensionAPI): void {
 
     const store = createPiCredentialStore(ctx.modelRegistry.authStorage);
     const reg = new ServerRegistry({ store, persist: (cfg) => saveConfig(cfg) });
-    reg.load(await loadConfig());
+    const cfg = await loadConfig();
+    reg.load(cfg);
+    settings = cfg.settings;
     registry = reg;
 
     // 1) Register every enabled server from the saved config.
@@ -119,12 +132,18 @@ export default function crossbar(pi: ExtensionAPI): void {
       // Discovery is best-effort; the user can always add servers via /crossbar.
     }
 
-    // 3) Loaded-model widget + health poll (UI modes only).
+    // 3) Loaded-model widget + health poll (UI modes only — a long-lived timer must
+    //    not keep one-shot/headless CLI runs alive). Each tick refreshes health +
+    //    models (re-registering on change) for every enabled server, then repaints.
     if (ctx.hasUI) {
       widget = installLoadedWidget(pi, ctx, reg);
-      await widget.refresh();
+      const tick = async (): Promise<void> => {
+        await pollAll(pi, reg);
+        await widget?.refresh();
+      };
+      await tick();
       pollTimer = setInterval(() => {
-        void widget?.refresh();
+        void tick();
       }, HEALTH_POLL_MS);
     }
   });
@@ -133,6 +152,16 @@ export default function crossbar(pi: ExtensionAPI): void {
     if (pollTimer) {
       clearInterval(pollTimer);
       pollTimer = undefined;
+    }
+    // Unwind our Pi provider registrations so a reload starts clean.
+    if (registry) {
+      for (const record of registry.list()) {
+        try {
+          unregisterServer(pi, record);
+        } catch {
+          // Best-effort cleanup; never block shutdown.
+        }
+      }
     }
     widget?.dispose();
     widget = undefined;
