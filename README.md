@@ -115,6 +115,11 @@ conformance suite (`tests/conformance/`) validates every adapter against it, and
      It bumps `package.json`, commits, tags `vX.Y.Z`, and publishes.
   2. **Tag push** — `npm version patch && git push --follow-tags` locally.
 
+  Each release also creates a **GitHub Release** and updates [`CHANGELOG.md`](./CHANGELOG.md) — both
+  generated from [Conventional Commits](https://www.conventionalcommits.org/) via
+  [git-cliff](https://git-cliff.org) (`cliff.toml`). Write commit messages as `feat:`, `fix:`,
+  `docs:`, `ci:`, etc. and they're grouped into the notes automatically.
+
   **One-time setup:** on npmjs.com, add a **Trusted Publisher** for `@hypabolic/crossbar`
   (*Package settings → Trusted Publisher → GitHub Actions*) pointing at repo **`Hypabolic/Crossbar`**
   and workflow **`release.yml`**. The workflow authenticates through the OIDC `id-token` it already
