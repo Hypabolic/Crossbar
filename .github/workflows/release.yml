@@ -84,14 +84,15 @@ jobs:
       - name: Publish to npm (public, OIDC trusted publishing)
         run: npm publish --access public
 
-      # Release notes for THIS version, from Conventional Commits. `--tag` lets
-      # git-cliff label the as-yet-uncreated version so notes are correct before
-      # the tag exists.
+      # Release notes for THIS version, from Conventional Commits. The two trigger
+      # paths see different tag states when this runs: on a tag push the tag already
+      # exists (so --latest is correct), while on dispatch it does not yet exist (so
+      # use --unreleased --tag to label the pending commits as this version).
       - name: Generate release notes (git-cliff)
         uses: orhun/git-cliff-action@v4
         with:
           config: cliff.toml
-          args: --latest --strip header --tag ${{ steps.ver.outputs.tag }} --output RELEASE_NOTES.md
+          args: ${{ github.event_name == 'workflow_dispatch' && format('--unreleased --tag {0}', steps.ver.outputs.tag) || '--latest' }} --strip header --output RELEASE_NOTES.md
 
       # Create (or update) the GitHub Release. Using GITHUB_TOKEN, the tag it
       # creates does NOT recursively trigger this workflow's tag-push event.
@@ -113,7 +114,7 @@ jobs:
         uses: orhun/git-cliff-action@v4
         with:
           config: cliff.toml
-          args: --tag ${{ steps.ver.outputs.tag }} --output CHANGELOG.md
+          args: ${{ github.event_name == 'workflow_dispatch' && format('--tag {0} ', steps.ver.outputs.tag) || '' }}--output CHANGELOG.md
 
       - name: Commit CHANGELOG.md
         env:
