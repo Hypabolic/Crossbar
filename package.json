@@ -1,6 +1,6 @@
 {
   "name": "@hypabolic/crossbar",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "The local/self-hosted inference connector for Pi — multi-backend discovery, model switching, and zero-JSON in-TUI onboarding for the Pi coding agent.",
   "type": "module",
   "license": "MIT",
