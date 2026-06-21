@@ -79,3 +79,22 @@ jobs:
       # Hypabolic/Crossbar, workflow release.yml). Provenance is generated automatically.
       - name: Publish to npm (public, OIDC trusted publishing)
         run: npm publish --access public
+
+      # Resolve the tag for the GitHub Release: the pushed tag (tag path) or the
+      # tag the bump step just created (manual path).
+      - name: Resolve release tag
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "RELEASE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=v$(node -p "require('./package.json').version")" >> "$GITHUB_ENV"
+          fi
+
+      - name: Create GitHub Release
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --title "$RELEASE_TAG" \
+            --generate-notes \
+            --verify-tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
