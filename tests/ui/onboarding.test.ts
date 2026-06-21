@@ -21,6 +21,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   buildDiscoveredItems,
+  buildManageItems,
   buildModelItems,
   capabilityActions,
   normalizeManualUrl,
@@ -143,6 +144,77 @@ describe("buildDiscoveredItems", () => {
     const items = buildDiscoveredItems(discovered, []);
     // Label starts with the capitalized kind
     expect(items[0]!.label).toMatch(/^Lmstudio/);
+  });
+
+  it("appends registered servers that were not discovered this scan", () => {
+    // A registered server with a baseUrl not present in `discovered` should still
+    // appear (so it can be managed/removed even while offline).
+    const offline = makeRecord({
+      id: "crossbar-lmstudio-127-0-0-1-1234",
+      kind: "lmstudio",
+      baseUrl: "http://127.0.0.1:1234",
+      label: "LM Studio (127.0.0.1:1234)",
+    });
+    const items = buildDiscoveredItems([], [offline]);
+    // offline-registered entry + manual sentinel
+    expect(items).toHaveLength(2);
+    expect(items[0]!.value).toBe("http://127.0.0.1:1234");
+    expect(items[0]!.label).toContain("(added)");
+    expect(items[0]!.description).toContain("not currently discovered");
+    expect(items[1]!.value).toBe("__manual__");
+  });
+
+  it("does not duplicate a registered server that is also discovered", () => {
+    const discovered = [makeDiscovered()];
+    const existing = [makeRecord()]; // same id as the discovered server
+    const items = buildDiscoveredItems(discovered, existing);
+    // 1 discovered (marked added) + manual sentinel — NOT an extra offline row
+    expect(items).toHaveLength(2);
+    expect(items[0]!.label).toContain("(added)");
+    expect(items[1]!.value).toBe("__manual__");
+  });
+
+  it("skips disabled registered servers in the offline-append pass", () => {
+    const disabled = makeRecord({
+      id: "crossbar-vllm-127-0-0-1-8000",
+      kind: "vllm",
+      baseUrl: "http://127.0.0.1:8000",
+      enabled: false,
+    });
+    const items = buildDiscoveredItems([], [disabled]);
+    // Only the manual sentinel — the disabled server is not appended.
+    expect(items).toHaveLength(1);
+    expect(items[0]!.value).toBe("__manual__");
+  });
+});
+
+// ─── buildManageItems ─────────────────────────────────────────────────────────
+
+describe("buildManageItems", () => {
+  it("offers every capability action plus Remove for a full-capability backend", () => {
+    const values = buildManageItems(ollamaAdapter).map((i) => i.value);
+    expect(values).toEqual(
+      expect.arrayContaining(["switch", "load", "unload", "introspect", "remove"]),
+    );
+  });
+
+  it("always includes a Remove action, even for capability-less backends", () => {
+    for (const adapter of [vllmAdapter, openaiAdapter, anthropicAdapter, genericAdapter]) {
+      const values = buildManageItems(adapter).map((i) => i.value);
+      expect(values).toEqual(["remove"]);
+    }
+  });
+
+  it("puts Remove last in the list", () => {
+    const items = buildManageItems(ollamaAdapter);
+    expect(items[items.length - 1]!.value).toBe("remove");
+  });
+
+  it("gives every item a non-empty label and value", () => {
+    for (const item of buildManageItems(lmstudioAdapter)) {
+      expect(item.label.length).toBeGreaterThan(0);
+      expect(item.value.length).toBeGreaterThan(0);
+    }
   });
 });
 

@@ -24,45 +24,56 @@ import { Container, type SelectItem, SelectList, Text, matchesKey } from "@earen
 
 import type { BackendAdapter } from "../core/backend-adapter.ts";
 import { canIntrospect, canLoadUnload, canSwitch } from "../core/backend-adapter.ts";
-import type { DiscoveredServer, ModelDescriptor, ServerRecord } from "../core/types.ts";
+import type { DiscoveredServer, LoadedState, ModelDescriptor, ServerRecord } from "../core/types.ts";
 import type { ServerRegistry } from "../registry/registry.ts";
 import { serverId } from "../registry/ids.ts";
 import { adapterFor } from "../adapters/index.ts";
+import { unregisterServer } from "../shim/provider-shim.ts";
 import { createProbe } from "../discovery/probe.ts";
 
 // ─── Pure helpers ────────────────────────────────────────────────────────────
 
+/** Extract a `host:port` string from a base URL for compact labels. */
+function hostPortOf(baseUrl: string): string {
+  try {
+    const u = new URL(baseUrl);
+    return `${u.hostname}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
+  } catch {
+    return baseUrl.replace(/^https?:\/\//, "");
+  }
+}
+
+/** Capitalise a backend kind for display, e.g. "lmstudio" → "Lmstudio". */
+function kindLabelOf(kind: string): string {
+  return kind.charAt(0).toUpperCase() + kind.slice(1);
+}
+
 /**
- * Build a `SelectItem[]` representing the discovered servers for the top-level
- * onboarding list.  Already-registered servers are marked with a "(added)" suffix
- * so the user can see what is new vs. what Crossbar already knows about.
+ * Build a `SelectItem[]` representing the servers shown in the top-level onboarding
+ * list.  Three kinds of entry can appear:
+ *   - discovered servers (in discovery order) — already-registered ones get an
+ *     "(added)" suffix so the user can tell new from known;
+ *   - registered servers that are NOT currently discovered (e.g. offline), so they
+ *     can still be managed/removed;
+ *   - a sentinel "Add manually" entry, always last.
  *
- * Items are ordered: discovered servers first (in discovery order), then a
- * sentinel "Add manually" entry at the end.
+ * Selecting any already-registered entry opens the manage overlay; selecting a new
+ * discovered entry or the sentinel runs the add flow.
  */
 export function buildDiscoveredItems(
   discovered: DiscoveredServer[],
   existing: ServerRecord[],
 ): SelectItem[] {
   const existingIds = new Set(existing.map((r) => r.id));
+  const discoveredUrls = new Set(discovered.map((s) => s.baseUrl));
 
   const items: SelectItem[] = discovered.map((server): SelectItem => {
     const id = serverId(server.kind, server.baseUrl);
     const isAdded = existingIds.has(id);
 
-    // Extract host:port from baseUrl for the label suffix
-    let hostPort: string;
-    try {
-      const u = new URL(server.baseUrl);
-      hostPort = `${u.hostname}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
-    } catch {
-      hostPort = server.baseUrl.replace(/^https?:\/\//, "");
-    }
-
     // Compose a label: "[kind] host:port  ✓ healthy" or "(added)"
-    const kindLabel = server.kind.charAt(0).toUpperCase() + server.kind.slice(1);
     const healthMark = isAdded ? "(added)" : "✓ healthy";
-    const label = `${kindLabel} (${hostPort})`;
+    const label = `${kindLabelOf(server.kind)} (${hostPortOf(server.baseUrl)})`;
 
     return {
       value: server.baseUrl,
@@ -72,6 +83,18 @@ export function buildDiscoveredItems(
         : `${healthMark} · auth: ${server.auth}${server.version ? ` · v${server.version}` : ""}`,
     };
   });
+
+  // Append registered servers that weren't discovered this scan (offline / not
+  // reachable right now) so they remain manageable from the same list.
+  for (const record of existing) {
+    if (!record.enabled) continue;
+    if (discoveredUrls.has(record.baseUrl)) continue;
+    items.push({
+      value: record.baseUrl,
+      label: `${kindLabelOf(record.kind)} (${hostPortOf(record.baseUrl)})  (added)`,
+      description: "Registered · not currently discovered",
+    });
+  }
 
   // Always append the manual-add sentinel
   items.push({
@@ -151,6 +174,36 @@ export function capabilityActions(
   return actions;
 }
 
+/** One-line hints shown under each manage action. */
+const ACTION_DESCRIPTIONS: Record<string, string> = {
+  switch: "Make a model the active/served one",
+  load: "Load a model into memory",
+  unload: "Evict a loaded model from memory",
+  introspect: "Show which models are currently loaded",
+  remove: "Forget this server and delete its stored key",
+};
+
+/**
+ * Build the manage-overlay action list for an already-registered server: the
+ * adapter's capability-filtered actions (switch / load / unload / introspect) plus
+ * a "Remove server" action that is always available. Backends without any local
+ * capabilities (vLLM, OpenAI, Anthropic, generic) show only "Remove server".
+ */
+export function buildManageItems(adapter: BackendAdapter): SelectItem[] {
+  const items: SelectItem[] = capabilityActions(adapter).map((a) => {
+    const item: SelectItem = { value: a.value, label: a.label };
+    const desc = ACTION_DESCRIPTIONS[a.value];
+    if (desc !== undefined) item.description = desc;
+    return item;
+  });
+  items.push({
+    value: "remove",
+    label: "Remove server",
+    description: ACTION_DESCRIPTIONS["remove"]!,
+  });
+  return items;
+}
+
 /**
  * Coerce a user-supplied string (which may be bare "host:port", missing a scheme,
  * or already a valid URL) into a well-formed origin with no trailing slash.
@@ -175,6 +228,263 @@ export function normalizeManualUrl(input: string): string {
   const u = new URL(raw); // throws DOMException / TypeError on invalid input
   // Return only the origin (scheme + host + port), no path
   return u.origin.replace(/\/+$/, "");
+}
+
+// ─── Shared overlay + server-action helpers ─────────────────────────────────
+
+/** Reconstruct a minimal DiscoveredServer from a persisted record for adapter calls. */
+function serverFromRecord(record: ServerRecord): DiscoveredServer {
+  return {
+    kind: record.kind,
+    baseUrl: record.baseUrl,
+    auth: record.auth,
+    label: record.label,
+    confidence: 1,
+  };
+}
+
+/**
+ * Render a single-select overlay (titled SelectList in an accent border) and resolve
+ * to the chosen item value, or `null` on Esc/cancel. Shared by the model picker and
+ * the manage menus so they stay visually consistent.
+ */
+function selectOverlay(
+  ctx: ExtensionCommandContext,
+  title: string,
+  items: SelectItem[],
+  hint: string,
+): Promise<string | null> {
+  return ctx.ui.custom<string | null>(
+    (_tui, theme, _kb, done) => {
+      const container = new Container();
+      container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
+      container.addChild(new Text(theme.fg("accent", theme.bold(title))));
+
+      const list = new SelectList(items, Math.min(items.length, 12), getSelectListTheme());
+      list.onSelect = (item) => done(item.value);
+      list.onCancel = () => done(null);
+
+      container.addChild(list);
+      container.addChild(new Text(theme.fg("dim", hint)));
+      container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
+
+      return {
+        render: (width: number) => container.render(width),
+        invalidate: () => container.invalidate(),
+        handleInput: (data: string) => {
+          if (matchesKey(data, "escape")) {
+            done(null);
+            return;
+          }
+          list.handleInput(data);
+          _tui.requestRender();
+        },
+      };
+    },
+    { overlay: true, overlayOptions: { width: "60%" } },
+  );
+}
+
+const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+/** Fetch a server's models (live, falling back to last-known on failure). */
+async function fetchModels(
+  ctx: ExtensionCommandContext,
+  registry: ServerRegistry,
+  record: ServerRecord,
+): Promise<ModelDescriptor[] | null> {
+  const adapter = adapterFor(record.kind);
+  const cred = await registry.resolveCredential(record);
+  const probe = createProbe(record.baseUrl, { auth: cred, defaultTimeoutMs: 5000 });
+  try {
+    return await adapter.listModels(serverFromRecord(record), cred, probe);
+  } catch (err) {
+    if (record.lastKnownModels && record.lastKnownModels.length > 0) {
+      return record.lastKnownModels;
+    }
+    ctx.ui.notify(`Crossbar: could not list models — ${errMsg(err)}`, "error");
+    return null;
+  }
+}
+
+/** Switch the active model or load a model: pick from the list, then call the adapter. */
+async function performModelAction(
+  ctx: ExtensionCommandContext,
+  registry: ServerRegistry,
+  record: ServerRecord,
+  action: "switch" | "load",
+): Promise<void> {
+  const adapter = adapterFor(record.kind);
+  const models = await fetchModels(ctx, registry, record);
+  if (!models) return;
+  if (models.length === 0) {
+    ctx.ui.notify("Crossbar: server returned no models.", "warning");
+    return;
+  }
+
+  const title = action === "switch"
+    ? `Switch model — ${record.label}`
+    : `Load model — ${record.label}`;
+  const modelId = await selectOverlay(
+    ctx,
+    title,
+    buildModelItems(models.filter((m) => !m.embeddings)),
+    "↑↓ navigate · Enter select · Esc cancel",
+  );
+  if (!modelId) return;
+
+  const cred = await registry.resolveCredential(record);
+  // Loads can be slow (cold model into VRAM) — give them a generous budget.
+  const probe = createProbe(record.baseUrl, { auth: cred, defaultTimeoutMs: 60_000 });
+
+  ctx.ui.notify(
+    `Crossbar: ${action === "switch" ? "switching to" : "loading"} ${modelId}…`,
+    "info",
+  );
+  try {
+    if (action === "switch") {
+      if (!canSwitch(adapter)) return;
+      await adapter.switchModel(serverFromRecord(record), cred, modelId, probe);
+    } else {
+      if (!canLoadUnload(adapter)) return;
+      await adapter.loadUnload(serverFromRecord(record), cred, modelId, "load", probe);
+    }
+    ctx.ui.notify(
+      `Crossbar: ${modelId} ${action === "switch" ? "is now active" : "loaded"}.`,
+      "info",
+    );
+  } catch (err) {
+    ctx.ui.notify(`Crossbar: ${action} failed — ${errMsg(err)}`, "error");
+  }
+}
+
+/** Unload a currently-loaded model: resolve the loaded set, pick one, evict it. */
+async function performUnload(
+  ctx: ExtensionCommandContext,
+  registry: ServerRegistry,
+  record: ServerRecord,
+): Promise<void> {
+  const adapter = adapterFor(record.kind);
+  if (!canLoadUnload(adapter)) return;
+  const cred = await registry.resolveCredential(record);
+  const probe = createProbe(record.baseUrl, { auth: cred, defaultTimeoutMs: 5000 });
+
+  let loadedIds: string[] = record.lastKnownLoaded ?? [];
+  if (canIntrospect(adapter)) {
+    try {
+      const state = await adapter.introspectLoaded(serverFromRecord(record), cred, probe);
+      loadedIds = state.loadedModelIds;
+    } catch {
+      // Fall back to last-known on a failed introspection.
+    }
+  }
+  if (loadedIds.length === 0) {
+    ctx.ui.notify("Crossbar: no models are currently loaded.", "info");
+    return;
+  }
+
+  const modelId = await selectOverlay(
+    ctx,
+    `Unload model — ${record.label}`,
+    loadedIds.map((id) => ({ value: id, label: id })),
+    "↑↓ navigate · Enter select · Esc cancel",
+  );
+  if (!modelId) return;
+
+  ctx.ui.notify(`Crossbar: unloading ${modelId}…`, "info");
+  try {
+    await adapter.loadUnload(serverFromRecord(record), cred, modelId, "unload", probe);
+    ctx.ui.notify(`Crossbar: ${modelId} unloaded.`, "info");
+  } catch (err) {
+    ctx.ui.notify(`Crossbar: unload failed — ${errMsg(err)}`, "error");
+  }
+}
+
+/** Read and report the currently-loaded models for a server. */
+async function performIntrospect(
+  ctx: ExtensionCommandContext,
+  registry: ServerRegistry,
+  record: ServerRecord,
+): Promise<void> {
+  const adapter = adapterFor(record.kind);
+  if (!canIntrospect(adapter)) return;
+  const cred = await registry.resolveCredential(record);
+  const probe = createProbe(record.baseUrl, { auth: cred, defaultTimeoutMs: 5000 });
+
+  let state: LoadedState;
+  try {
+    state = await adapter.introspectLoaded(serverFromRecord(record), cred, probe);
+  } catch (err) {
+    ctx.ui.notify(`Crossbar: could not read loaded models — ${errMsg(err)}`, "error");
+    return;
+  }
+  if (state.loadedModelIds.length === 0) {
+    ctx.ui.notify(`Crossbar: ${record.label} has no models loaded.`, "info");
+    return;
+  }
+  const summary = state.loadedModelIds
+    .map((id) => {
+      const ctxLen = state.perModel?.[id]?.contextLength;
+      if (ctxLen === undefined) return id;
+      const ctxStr = ctxLen >= 1000 ? `${Math.round(ctxLen / 1000)}k` : `${ctxLen}`;
+      return `${id} (${ctxStr} ctx)`;
+    })
+    .join(", ");
+  ctx.ui.notify(`Crossbar: ${record.label} loaded — ${summary}`, "info");
+}
+
+/** Confirm and remove a server from the registry, auth.json, and Pi. */
+async function performRemove(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  registry: ServerRegistry,
+  record: ServerRecord,
+): Promise<void> {
+  const confirm = await ctx.ui.select(`Remove ${record.label}?`, ["Cancel", "Remove server"]);
+  if (confirm !== "Remove server") return;
+  unregisterServer(pi, record);
+  await registry.remove(record.id);
+  ctx.ui.notify(`Crossbar: removed ${record.label}.`, "info");
+}
+
+/**
+ * Open the manage overlay for an already-registered server: show the
+ * capability-filtered action menu and dispatch the chosen action.
+ */
+export async function openServerActions(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  deps: OnboardingDeps,
+  record: ServerRecord,
+): Promise<void> {
+  const { registry } = deps;
+  const adapter = adapterFor(record.kind);
+
+  const choice = await selectOverlay(
+    ctx,
+    `Manage — ${record.label}`,
+    buildManageItems(adapter),
+    "↑↓ navigate · Enter select · Esc close",
+  );
+  if (!choice) return;
+
+  switch (choice) {
+    case "switch":
+      await performModelAction(ctx, registry, record, "switch");
+      break;
+    case "load":
+      await performModelAction(ctx, registry, record, "load");
+      break;
+    case "unload":
+      await performUnload(ctx, registry, record);
+      break;
+    case "introspect":
+      await performIntrospect(ctx, registry, record);
+      break;
+    case "remove":
+      await performRemove(pi, ctx, registry, record);
+      break;
+  }
 }
 
 // ─── Overlay flow driver ────────────────────────────────────────────────────
@@ -203,7 +513,7 @@ export interface OnboardingDeps {
  * @param deps - injected registry + discover function (for testability)
  */
 export async function openOnboarding(
-  _pi: ExtensionAPI,
+  pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   deps: OnboardingDeps,
 ): Promise<void> {
@@ -299,7 +609,15 @@ export async function openOnboarding(
 
     targetBaseUrl = normalizedUrl;
   } else {
-    // Discovered server path
+    // Already-registered server (discovered or offline) → open the manage overlay
+    // instead of re-running the add flow.
+    const existingRecord = registry.list().find((r) => r.baseUrl === chosenBaseUrl);
+    if (existingRecord) {
+      await openServerActions(pi, ctx, deps, existingRecord);
+      return;
+    }
+
+    // New discovered server path
     discoveredServer = discovered.find((s) => s.baseUrl === chosenBaseUrl);
     targetBaseUrl = chosenBaseUrl;
   }
@@ -368,47 +686,11 @@ export async function openOnboarding(
   }
 
   // ── Step 5: pick default model ─────────────────────────────────────────────
-  const modelItems = buildModelItems(models);
-
-  const chosenModelId = await ctx.ui.custom<string | null>(
-    (_tui, theme, _kb, done) => {
-      const container = new Container();
-
-      container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
-      container.addChild(
-        new Text(theme.fg("accent", theme.bold(`Pick default model — ${discoveredServer!.label}`))),
-      );
-
-      const list = new SelectList(
-        modelItems,
-        Math.min(modelItems.length, 12),
-        getSelectListTheme(),
-      );
-
-      list.onSelect = (item) => done(item.value);
-      list.onCancel = () => done(null);
-
-      container.addChild(list);
-      container.addChild(
-        new Text(theme.fg("dim", "↑↓ navigate · Enter select · Esc skip")),
-      );
-      container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
-
-      return {
-        render: (width: number) => container.render(width),
-        invalidate: () => container.invalidate(),
-        handleInput: (data: string) => {
-          // Allow Esc to skip model selection
-          if (matchesKey(data, "escape")) {
-            done(null);
-            return;
-          }
-          list.handleInput(data);
-          _tui.requestRender();
-        },
-      };
-    },
-    { overlay: true, overlayOptions: { width: "60%" } },
+  const chosenModelId = await selectOverlay(
+    ctx,
+    `Pick default model — ${discoveredServer.label}`,
+    buildModelItems(models),
+    "↑↓ navigate · Enter select · Esc skip",
   );
 
   // chosenModelId === null means the user skipped — still register the server
