@@ -106,51 +106,10 @@ The `BackendAdapter` contract (`src/core/`) is the frozen boundary every adapter
 conformance suite (`tests/conformance/`) validates every adapter against it, and
 `tests/integration/` exercises the real discovery path over live sockets.
 
-### CI / releasing
+### CI
 
-- **CI** (`.github/workflows/ci.yml`) runs `tsc --noEmit` + the full test suite on every push and PR
-  (Node 22 & 24).
-- **Releases** (`.github/workflows/release.yml`) publish to npm via **GitHub→npm OIDC trusted
-  publishing** — no tokens or secrets. [Provenance](https://docs.npmjs.com/generating-provenance-statements)
-  is attached automatically. Two ways:
-  1. **Manual** — GitHub → *Actions → Release → Run workflow* → choose `patch` / `minor` / `major`.
-     It bumps `package.json`, commits, tags `vX.Y.Z`, and publishes.
-  2. **Tag push** — `npm version patch && git push --follow-tags` locally.
-
-  Each release also creates a **GitHub Release** and updates [`CHANGELOG.md`](./CHANGELOG.md) — both
-  generated from [Conventional Commits](https://www.conventionalcommits.org/) via
-  [git-cliff](https://git-cliff.org) (`cliff.toml`). Write commit messages as `feat:`, `fix:`,
-  `docs:`, `ci:`, etc. and they're grouped into the notes automatically.
-
-  **One-time setup:** on npmjs.com, add a **Trusted Publisher** for `@hypabolic/crossbar`
-  (*Package settings → Trusted Publisher → GitHub Actions*) pointing at repo **`Hypabolic/Crossbar`**
-  and workflow **`release.yml`**. The workflow authenticates through the OIDC `id-token` it already
-  requests — no `NPM_TOKEN` needed.
-
-## Demo & local testing
-
-No LM Studio install needed to try the flow:
-
-```bash
-# 1. Start a fake LM Studio on :1234 (native v1 API + OpenAI-compat chat)
-node scripts/fake-lmstudio.mjs
-
-# 2. In another shell, run Pi with the extension and open /crossbar
-pi -e .
-```
-
-The fake server (`scripts/fake-lmstudio.mjs`) is dependency-free and serves the same
-endpoints Crossbar fingerprints, plus an OpenAI-compatible `/v1/chat/completions` (with
-`prompt_tokens_details.cached_tokens`) so cache-hit reporting works end-to-end.
-
-The demo GIF above (`docs/onboarding.gif`) is a deterministic *render* of the overlay
-frames — same layout, labels, and theme tokens the TUI produces — so it needs no terminal
-recorder. Regenerate it with:
-
-```bash
-npm i --no-save @napi-rs/canvas gifenc   # dev-only, intentionally not in package.json
-npm run demo:gif
-```
+CI (`.github/workflows/ci.yml`) runs `tsc --noEmit` + the full test suite on every push and PR
+(Node 22 & 24).
 
 ## License
 
