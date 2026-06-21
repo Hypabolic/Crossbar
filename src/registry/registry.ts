@@ -8,7 +8,7 @@
  * Session wiring (session_start poll, session_shutdown cleanup) is Wave C and is NOT here.
  */
 
-import type { CrossbarConfigFile, ServerCredential, ServerRecord } from "../core/types.ts";
+import type { CrossbarConfigFile, HealthState, ServerCredential, ServerRecord } from "../core/types.ts";
 import type { CredentialStore } from "./persistence.ts";
 
 export interface RegistryDeps {
@@ -27,6 +27,8 @@ export interface HealthCachePatch {
 
 export class ServerRegistry {
   private readonly records: Map<string, ServerRecord> = new Map();
+  /** Ephemeral, non-persisted health snapshot per server id (refreshed by the poll). */
+  private readonly health: Map<string, HealthState> = new Map();
   private readonly store: CredentialStore;
   private readonly persist: (config: CrossbarConfigFile) => Promise<void>;
   private readonly now: () => number;
@@ -120,6 +122,16 @@ export class ServerRegistry {
     if (patch.loaded !== undefined) updated.lastKnownLoaded = patch.loaded;
     if (patch.lastSeenAt !== undefined) updated.lastSeenAt = patch.lastSeenAt;
     this.records.set(id, updated);
+  }
+
+  /** Record the latest health state for a server (ephemeral; drives the live widget). */
+  setHealth(id: string, state: HealthState): void {
+    this.health.set(id, state);
+  }
+
+  /** Last observed health state for a server, or undefined if not yet polled. */
+  getHealth(id: string): HealthState | undefined {
+    return this.health.get(id);
   }
 
   // ---------------------------------------------------------------------------

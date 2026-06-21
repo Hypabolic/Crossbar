@@ -24,7 +24,7 @@ import { adapterFor } from "../adapters/index.ts";
 import { canIntrospect } from "../core/backend-adapter.ts";
 import { createProbe } from "../discovery/probe.ts";
 import type { ServerRegistry } from "../registry/registry.ts";
-import type { LoadedState } from "../core/types.ts";
+import type { HealthState, LoadedState } from "../core/types.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,6 +38,8 @@ export interface LoadedEntry {
   loaded: string[];
   /** Whether the data came from a live introspection call or a cache. */
   source: LoadedState["source"];
+  /** Latest polled health state, when known. Drives a degraded/unreachable indicator. */
+  health?: HealthState;
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +68,15 @@ export function formatLoadedStatus(
   const parts: string[] = [];
 
   for (const entry of entries) {
+    // Unhealthy servers take precedence over loaded state — surface why we can't
+    // show live models rather than implying the server is idle.
+    if (entry.health === "unreachable" || entry.health === "degraded" || entry.health === "unauthorized") {
+      const detail =
+        entry.health === "unauthorized" ? "auth" : entry.health === "degraded" ? "degraded" : "unreachable";
+      parts.push(`${theme.fg("warning", "✕")} ${theme.fg("dim", `${entry.label}:${detail}`)}`);
+      continue;
+    }
+
     const isLive = entry.source === "introspection";
 
     if (entry.loaded.length === 0) {
@@ -128,10 +139,14 @@ export async function computeLoadedEntries(
         const probe = createProbe(record.baseUrl, { auth: cred });
 
         const state = await adapter.introspectLoaded(server, cred, probe);
+        // Persist the live snapshot so the "last-known" fallback has data when the
+        // server later goes offline (or for the next render before the poll runs).
+        registry.updateHealthCache(record.id, { loaded: state.loadedModelIds });
         return {
           label: record.label,
           loaded: state.loadedModelIds,
           source: "introspection" as const,
+          ...attachHealth(registry, record.id),
         };
       }
 
@@ -140,6 +155,7 @@ export async function computeLoadedEntries(
         label: record.label,
         loaded: record.lastKnownLoaded ?? [],
         source: "last-known" as const,
+        ...attachHealth(registry, record.id),
       };
     }),
   );
@@ -158,12 +174,19 @@ export async function computeLoadedEntries(
           label: record.label,
           loaded: record.lastKnownLoaded ?? [],
           source: "last-known" as const,
+          ...attachHealth(registry, record.id),
         });
       }
     }
   }
 
   return entries;
+}
+
+/** Read the latest polled health for a server, as a spreadable partial entry. */
+function attachHealth(registry: ServerRegistry, id: string): { health?: HealthState } {
+  const health = registry.getHealth(id);
+  return health !== undefined ? { health } : {};
 }
 
 // ---------------------------------------------------------------------------

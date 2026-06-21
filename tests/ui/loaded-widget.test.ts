@@ -122,6 +122,29 @@ describe("formatLoadedStatus", () => {
       expect(token).not.toMatch(/\\x1b|\x1b/);
     }
   });
+
+  it("surfaces an unreachable server instead of its (stale) loaded models", () => {
+    const entries: LoadedEntry[] = [
+      { label: "Ollama", loaded: ["llama3.1"], source: "last-known", health: "unreachable" },
+    ];
+    const result = formatLoadedStatus(entries, fakeTheme);
+    expect(result).toContain("Ollama:unreachable");
+    expect(result).not.toContain("llama3.1");
+  });
+
+  it("shows an auth indicator for unauthorized servers", () => {
+    const entries: LoadedEntry[] = [
+      { label: "vLLM", loaded: [], source: "last-known", health: "unauthorized" },
+    ];
+    expect(formatLoadedStatus(entries, fakeTheme)).toContain("vLLM:auth");
+  });
+
+  it("shows live models normally when health is healthy", () => {
+    const entries: LoadedEntry[] = [
+      { label: "Ollama", loaded: ["llama3.1"], source: "introspection", health: "healthy" },
+    ];
+    expect(formatLoadedStatus(entries, fakeTheme)).toContain("Ollama:llama3.1");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -190,9 +213,11 @@ function makeFakeRegistry(records: ServerRecord[]): ServerRegistry {
     setEnabled: async () => {
       throw new Error("not implemented");
     },
-    updateHealthCache: () => {
-      throw new Error("not implemented");
-    },
+    // computeLoadedEntries persists the live snapshot and reads health; both are
+    // exercised here, so provide working no-op/empty implementations.
+    updateHealthCache: () => {},
+    setHealth: () => {},
+    getHealth: () => undefined,
   } as unknown as ServerRegistry;
 }
 
@@ -413,6 +438,34 @@ describe("computeLoadedEntries", () => {
     await expect(computeLoadedEntries(registry)).resolves.toHaveLength(1);
     const entries = await computeLoadedEntries(registry);
     expect(entries[0]?.source).toBe("last-known");
+
+    __testAdapterMap.delete("ollama");
+  });
+
+  it("persists the live snapshot to the cache and attaches polled health", async () => {
+    __testAdapterMap.set(
+      "ollama",
+      makeIntrospectableAdapter("ollama", { loadedModelIds: ["llama3.1"], source: "introspection" }),
+    );
+    const record = makeRecord({ id: "r1", kind: "ollama", label: "Ollama", enabled: true });
+
+    const loadedWrites: string[][] = [];
+    const base = makeFakeRegistry([record]) as unknown as Record<string, unknown>;
+    const registry = {
+      ...base,
+      list: () => [record],
+      resolveCredential: async () => ({ mode: "none" as const }),
+      updateHealthCache: (_id: string, patch: { loaded?: string[] }) => {
+        if (patch.loaded) loadedWrites.push(patch.loaded);
+      },
+      getHealth: () => "degraded" as const,
+      setHealth: () => {},
+    } as unknown as ServerRegistry;
+
+    const entries = await computeLoadedEntries(registry);
+
+    expect(loadedWrites).toEqual([["llama3.1"]]); // live snapshot persisted
+    expect(entries[0]?.health).toBe("degraded"); // polled health attached
 
     __testAdapterMap.delete("ollama");
   });
