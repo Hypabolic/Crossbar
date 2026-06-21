@@ -2,7 +2,7 @@
  * Conformance fixture for the LM Studio adapter.
  *
  * Provides canned HTTP responses covering:
- *   - positive fingerprint (LM Studio /api/v0/models with state + compatibility_type)
+ *   - positive fingerprint (LM Studio /api/v1/models with state + compatibility_type)
  *   - negative fingerprint (Ollama "/" response)
  *   - auth failure (401)
  *   - server-down-mid-switch (load ok then models list REFUSED)
@@ -23,7 +23,7 @@ import { lmstudioAdapter } from "../../src/adapters/lmstudio.ts";
 // Canned model payloads
 // ---------------------------------------------------------------------------
 
-/** LM Studio /api/v0/models response — lms-vlm-b is loaded; lms-chat-a is not. */
+/** LM Studio /api/v1/models response — lms-vlm-b is loaded; lms-chat-a is not. */
 const MODELS_ALL: ProbeResult = {
   status: 200,
   ok: true,
@@ -122,27 +122,27 @@ const LOAD_UNLOAD_OK: ProbeResult = {
 
 /** Positive happy-path routes (vlm-b is loaded). */
 const POSITIVE_ROUTES: Record<string, ProbeResult | ((init?: import("../../src/core/types.ts").ProbeInit) => ProbeResult)> = {
-  "/api/v0/models": MODELS_ALL,
+  "/api/v1/models": MODELS_ALL,
   "POST /api/v1/models/load": LOAD_UNLOAD_OK,
   "POST /api/v1/models/unload": LOAD_UNLOAD_OK,
 };
 
 /**
  * switchSuccessRoutes: load POST succeeds, then the confirmation GET
- * /api/v0/models returns lms-chat-a as loaded.
+ * /api/v1/models returns lms-chat-a as loaded.
  */
 const SWITCH_SUCCESS_ROUTES: Record<string, ProbeResult | ((init?: import("../../src/core/types.ts").ProbeInit) => ProbeResult)> = {
   "POST /api/v1/models/load": LOAD_UNLOAD_OK,
-  "/api/v0/models": MODELS_AFTER_SWITCH,
+  "/api/v1/models": MODELS_AFTER_SWITCH,
 };
 
 /**
- * serverDownRoutes: load POST succeeds but the confirmation GET /api/v0/models
+ * serverDownRoutes: load POST succeeds but the confirmation GET /api/v1/models
  * returns REFUSED (connection dropped mid-switch).
  */
 const SERVER_DOWN_ROUTES: Record<string, ProbeResult | ((init?: import("../../src/core/types.ts").ProbeInit) => ProbeResult)> = {
   "POST /api/v1/models/load": LOAD_UNLOAD_OK,
-  "/api/v0/models": sequence(REFUSED),
+  "/api/v1/models": sequence(REFUSED),
 };
 
 /** negativeRoutes: Ollama root response — must yield null from fingerprint. */
@@ -157,7 +157,7 @@ const NEGATIVE_ROUTES: Record<string, ProbeResult> = {
 
 /** authFailureRoutes: every path returns 401. */
 const AUTH_FAILURE_ROUTES: Record<string, ProbeResult> = {
-  "/api/v0/models": UNAUTHORIZED,
+  "/api/v1/models": UNAUTHORIZED,
   "POST /api/v1/models/load": UNAUTHORIZED,
   "POST /api/v1/models/unload": UNAUTHORIZED,
 };

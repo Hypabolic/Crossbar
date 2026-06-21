@@ -7,7 +7,7 @@ adapter registers under (`oai` = `openai-completions`, `ant` = `anthropic-messag
 | Backend | port | pi api | listModels | introspectLoaded | switchModel | loadUnload | auth | health | perModelCaps | streaming | discovery fingerprint |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | **Ollama** | 11434 | oai | ✅ `/api/tags`,`/v1/models` | ✅ `/api/ps` | ✅ implicit (request id) | ✅ `keep_alive:0` | ◐ none local | ✅ `GET /` text | ✅ `/api/show` caps + ctx | ✅ | `GET /` → `Ollama is running` |
-| **LM Studio** | 1234 | oai | ✅ `/api/v0/models`,`/v1/models` | ✅ `state` field | ✅ JIT + `/api/v1/models/load` | ✅ load/unload + `lms` | ◐ Bearer, none default | ◐ infer 200 | ✅ type+`max_context_length` | ✅ | `/api/v0/models` w/ `state`,`compatibility_type` |
+| **LM Studio** | 1234 | oai | ✅ `/api/v1/models` (v0 fallback) | ✅ `state` field | ✅ JIT + `/api/v1/models/load` | ✅ load/unload + `lms` | ◐ Bearer, none default | ◐ infer 200 | ✅ type+`max_context_length` | ✅ | `/api/v1/models` (v0 fallback) w/ `state`,`compatibility_type` |
 | **llama-server** | 8080 | oai | ✅ `/v1/models` | ◐ `/props`,`/slots` (single) | ❌ (1/instance) | ❌ classic | ◐ none / `--api-key` | ✅ `/health` | ◐ ctx via `/props`,`meta` | ✅ | `/props` w/ `default_generation_settings`+`build_info` |
 | **llama-swap** | 8080 | oai/ant | ✅ `/v1/models` (all config) | ✅ `/running` | ✅ via `model` → restart upstream | ✅ `/api/models/unload`, ttl | ◐ optional multi-scheme | ✅ `/health`→OK | ◐ via upstream | ✅ | `/` → `/ui/`; `/running`,`/upstream/{model}` |
 | **vLLM** | 8000 | oai | ✅ `/v1/models` | ◐ `/is_sleeping` (dev) | ❌ base · ◐ LoRA | ◐ sleep/wake + LoRA | ◐ none / `--api-key` | ✅ `/health` | ◐ `max_model_len` only | ✅ | `/version` + `/metrics` `vllm:` + `owned_by:"vllm"` |
@@ -38,7 +38,7 @@ adapter registers under (`oai` = `openai-completions`, `ant` = `anthropic-messag
 
 1. `GET /` → `Ollama is running` ⇒ Ollama · redirect `/ui/` ⇒ llama-swap
 2. `GET /api/extra/version` → `{"result":"KoboldCpp"}` ⇒ KoboldCpp
-3. `GET /api/v0/models` 200 w/ `state`/`compatibility_type` ⇒ LM Studio
+3. `GET /api/v1/models` (v0 fallback) 200 w/ `state`/`compatibility_type` ⇒ LM Studio
 4. `GET /props` w/ `default_generation_settings`+`build_info` ⇒ llama-server / llamafile
 5. `GET /version` + `/metrics` `vllm:` ⇒ vLLM
 6. `GET /v1/models` shape: `owned_by:"vllm"`⇒vLLM · `meta.n_ctx_train`⇒llama.cpp ·

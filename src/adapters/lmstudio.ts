@@ -2,16 +2,20 @@
  * LM Studio backend adapter.
  *
  * Implements the BackendAdapter contract for LM Studio's local server.
- * Uses the LM Studio-native /api/v0/* endpoints for discovery and management,
- * and delegates inference to the OpenAI-compatible /v1/* layer.
+ * Uses the LM Studio-native REST API for discovery and management, and delegates
+ * inference to the OpenAI-compatible /v1/* layer.
+ *
+ * LM Studio 0.4.0+ ships a native `/api/v1/*` REST API (recommended); the older
+ * `/api/v0/*` API carries the same rich model fields and is kept as a fallback for
+ * pre-0.4.0 servers. We prefer v1 and fall back to v0 only on a 404.
  *
  * Key API endpoints:
- *   GET  /api/v0/models            — model list with state, type, context lengths
- *   POST /api/v1/models/load       — load a model by id
- *   POST /api/v1/models/unload     — unload a model by id
+ *   GET  /api/v1/models  (→ /api/v0/models fallback)  — model list with state, type, context length
+ *   POST /api/v1/models/load                          — load a model by id
+ *   POST /api/v1/models/unload                        — unload a model by id
  *
  * Fingerprint discriminator: data[] entries have both `state` and
- * `compatibility_type` fields (unique to LM Studio's v0 API).
+ * `compatibility_type` fields (unique to LM Studio's native API).
  */
 
 import { Capability } from "../core/capability.ts";
@@ -24,8 +28,13 @@ import type {
   ModelDescriptor,
   PiModelEntry,
   Probe,
+  ProbeResult,
   ServerCredential,
 } from "../core/types.ts";
+
+/** Native model-list endpoints, in preference order (v1 first, v0 fallback for <0.4.0). */
+const MODELS_V1 = "/api/v1/models";
+const MODELS_V0 = "/api/v0/models";
 
 // ---------------------------------------------------------------------------
 // LM Studio API shapes (narrowed from unknown JSON)
@@ -140,10 +149,21 @@ class LmStudioAdapter implements BackendAdapter {
     Capability.Streaming,
   ]);
 
+  /**
+   * Fetch the native model list, preferring /api/v1/models and falling back to
+   * /api/v0/models for LM Studio < 0.4.0 (which only exposes the v0 REST API).
+   * Falls back ONLY on a 404 so auth (401) and unreachable (0) errors propagate.
+   */
+  private async modelsResponse(probe: Probe): Promise<ProbeResult> {
+    const v1 = await probe(MODELS_V1);
+    if (v1.status === 404) return probe(MODELS_V0);
+    return v1;
+  }
+
   // --- fingerprint ----------------------------------------------------------
 
   async fingerprint(baseUrl: string, probe: Probe): Promise<DiscoveredServer | null> {
-    const r = await probe("/api/v0/models");
+    const r = await this.modelsResponse(probe);
     if (!r.ok || r.status === 0) return null;
     if (!hasLmsDiscriminator(r.json)) return null;
 
@@ -163,7 +183,7 @@ class LmStudioAdapter implements BackendAdapter {
     _cred: ServerCredential,
     probe: Probe,
   ): Promise<HealthStatus> {
-    const r = await probe("/api/v0/models");
+    const r = await this.modelsResponse(probe);
     if (r.status === 0) return { state: "unreachable" };
     if (r.status === 401) return { state: "unauthorized" };
     if (!r.ok) return { state: "degraded" };
@@ -179,7 +199,7 @@ class LmStudioAdapter implements BackendAdapter {
     _cred: ServerCredential,
     probe: Probe,
   ): Promise<ModelDescriptor[]> {
-    const r = await probe("/api/v0/models");
+    const r = await this.modelsResponse(probe);
     if (!r.ok) {
       if (r.status === 401) throw new Error("401 Unauthorized");
       if (r.status === 0) throw new Error("listModels failed: server unreachable");
@@ -197,7 +217,7 @@ class LmStudioAdapter implements BackendAdapter {
     _cred: ServerCredential,
     probe: Probe,
   ): Promise<LoadedState> {
-    const r = await probe("/api/v0/models");
+    const r = await this.modelsResponse(probe);
     if (!r.ok) {
       if (r.status === 401) throw new Error("401 Unauthorized");
       if (r.status === 0) throw new Error("introspectLoaded failed: server unreachable");
@@ -242,7 +262,7 @@ class LmStudioAdapter implements BackendAdapter {
     }
 
     // Step 2: Confirm via model list that the target is now loaded
-    const r2 = await probe("/api/v0/models");
+    const r2 = await this.modelsResponse(probe);
     if (!r2.ok) {
       if (r2.status === 0) throw new Error("switchModel confirmation failed: server went down");
       if (r2.status === 401) throw new Error("401 Unauthorized");

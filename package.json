@@ -5,7 +5,14 @@
   "type": "module",
   "license": "MIT",
   "author": "Hypabolic",
-  "homepage": "https://github.com/hypabolic/crossbar",
+  "homepage": "https://github.com/Hypabolic/Crossbar#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hypabolic/Crossbar.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Hypabolic/Crossbar/issues"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",
