@@ -10,7 +10,7 @@ wiring Pi to *any* local or self-hosted model backend effortless — zero hand-e
 inside Pi's TUI, with auto-discovery, multi-server support, live "currently loaded" indicators, and
 in-place model switching.
 
-> Built by [Hypabolic](https://github.com/hypabolic).
+> Built by [Hypabolic](https://hypabolic.com).
 
 ![Crossbar onboarding: discover a server, open the manage menu, switch the active model](docs/onboarding.gif)
 
