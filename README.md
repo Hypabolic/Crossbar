@@ -1,5 +1,8 @@
 # Crossbar
 
+[![CI](https://github.com/Hypabolic/Crossbar/actions/workflows/ci.yml/badge.svg)](https://github.com/Hypabolic/Crossbar/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@hypabolic/crossbar)](https://www.npmjs.com/package/@hypabolic/crossbar)
+
 **The local/self-hosted inference connector Pi should have shipped with.**
 
 Crossbar is an extension for the [Pi coding agent](https://github.com/earendil-works/pi) that makes
@@ -100,6 +103,21 @@ npm test        # vitest (conformance + unit + live-socket integration)
 The `BackendAdapter` contract (`src/core/`) is the frozen boundary every adapter implements; the
 conformance suite (`tests/conformance/`) validates every adapter against it, and
 `tests/integration/` exercises the real discovery path over live sockets.
+
+### CI / releasing
+
+- **CI** (`.github/workflows/ci.yml`) runs `tsc --noEmit` + the full test suite on every push and PR
+  (Node 22 & 24).
+- **Releases** (`.github/workflows/release.yml`) publish to npm with [provenance](https://docs.npmjs.com/generating-provenance-statements).
+  Two ways:
+  1. **Manual** — GitHub → *Actions → Release → Run workflow* → choose `patch` / `minor` / `major`.
+     It bumps `package.json`, commits, tags `vX.Y.Z`, and publishes.
+  2. **Tag push** — `npm version patch && git push --follow-tags` locally.
+
+  **One-time setup:** add an npm **automation** access token as the repo secret **`NPM_TOKEN`**
+  (Settings → Secrets and variables → Actions). An *automation* token bypasses interactive 2FA/OTP so
+  CI can publish unattended. (Optionally migrate to npm OIDC trusted publishing later — the workflow
+  already requests `id-token: write`.)
 
 <!-- TODO: add an onboarding demo GIF (docs/onboarding.gif) recorded against a live Ollama + LM Studio. -->
 

@@ -1,0 +1,76 @@
+name: Release
+
+# Two ways to cut a release — both run tests, then publish to npm with provenance:
+#   1. Manual: Actions → Release → "Run workflow" → pick patch/minor/major.
+#      This bumps package.json, commits, tags vX.Y.Z, pushes, and publishes.
+#   2. Tag push: `npm version patch && git push --follow-tags` locally, which
+#      triggers this workflow on the new tag and publishes the existing version.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Semver bump"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: write # push the version commit + tag (manual path)
+  id-token: write # npm provenance (OIDC)
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: publish @hypabolic/crossbar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Install (clean, from lockfile)
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run check
+
+      - name: Test
+        run: npm test
+
+      # --- Manual path: bump version, commit, tag, push ---
+      - name: Bump version and push tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          npm version "${{ inputs.bump }}" -m "chore(release): v%s"
+          git push --follow-tags
+
+      # --- Tag-push path: ensure the tag matches package.json ---
+      - name: Verify tag matches package.json version
+        if: github.event_name == 'push'
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "package.json=$PKG_VERSION  tag=$TAG_VERSION"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Publish to npm (public, with provenance)
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
