@@ -43,8 +43,11 @@ Two evidence tiers are used:
 - Entry point: `export default function (pi: ExtensionAPI): void | Promise<void>`
   — `core/extensions/types.ts:1416` (`ExtensionFactory`). Async factories are awaited before
   `session_start` flushes, so async auto-discovery at startup is supported. (`docs/extensions.md:182`)
-- **Do not** start long-lived resources in the factory (it may run with no session). Defer to
-  `session_start`; clean up in `session_shutdown`. (`docs/extensions.md:219`)
+- **Do not** start long-lived resources (timers, polling, UI, discovery) in the factory (it may run
+  with no session). The factory *is* the right place for durable registration from cache
+  (`preloadCachedProviders` + `pi.registerProvider`) because Pi flushes queued provider registrations
+  before model resolution. Defer live refresh, discovery, widgets, and poll to `session_start`;
+  clean up in `session_shutdown`. (`docs/extensions.md:219`)
 - Auto-loaded from `~/.pi/agent/extensions/*.ts` and `.pi/extensions/*.ts`, or via a package listed
   in `settings.json` `packages`. (`docs/extensions.md:108`)
 - Relevant registration APIs on `pi` (`core/extensions/types.ts:1120-1385`):

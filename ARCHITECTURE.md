@@ -111,16 +111,36 @@ register(record):
   model list, and **re-register only when the model set changed** (`reRegisterServer`). The loaded widget
   persists each live introspection into the cache so the `last-known` fallback has data when a server
   drops offline, and renders a degraded/unreachable/auth indicator from the polled health.
-- **Lifecycle:** `session_start` → load `crossbar.json` (+ `settings`) → register saved enabled servers →
-  run auto-discovery (localhost, plus LAN when opted in) → install widget → poll. `session_shutdown` →
-  stop poll, **unregister every provider**, dispose widget.
+- **Two-phase startup:** async factory (`src/index.ts`) calls `preloadCachedProviders` first (before
+  Pi resolves any models) to register enabled servers that have a `lastKnownModels` cache using the
+  pure `buildProviderConfig` path (`registerCachedServer`). No network, no UI, no timers, never throws.
+  `session_start` then builds the live `ServerRegistry`, does refresh + auto-discovery + widget + poll.
+  `catalogueChanged` + `setLastKnownModels` (which calls flush) ensure registration-relevant catalogue
+  updates are durable; `updateHealthCache` remains ephemeral.
+- **Lifecycle:** each fresh extension instance (startup /reload /new /resume /fork) runs the factory
+  and preloads from `crossbar.json`. `session_start` → load `crossbar.json` (+ `settings`) → live
+  refresh/register of enabled + auto-discovery → widget + poll (UI). `session_shutdown` → stop poll,
+  unregister providers (best-effort), dispose widget. Shutdown unregs + replacement factory preload
+  (by stable id) ensures replacement runtimes are not left without cached providers.
+- **Persistence:** `setLastKnownModels` (manual add at save time, auto-disc first reg, startup
+  refresh on change, poll changed branch) + atomic rename in `saveConfig`. Never persists health or
+  `lastSeenAt`.
 
 ## 5. Discovery engine (`discovery/`)
 
 - **Default scope: localhost only.** Probe ports `[11434,1234,8080,8000,5000,5001,1337]` on `127.0.0.1`
-  (override with `CrossbarSettings.probePorts`). LAN host-range probing is opt-in and **wired**: set
-  `CrossbarSettings.lanDiscovery: true` and list `lanHosts` (IPs/hostnames — no mDNS exists for any
-  backend); `discoverLan` probes `lanHosts × probePorts` and merges/de-dupes into the localhost results.
+  (override with `CrossbarSettings.probePorts`). LAN probing is opt-in and **wired**: set
+  `CrossbarSettings.lanDiscovery: true`. With no `lanHosts`, `discover()` **auto-detects the host's own
+  private subnet(s)** via `localSubnetCidrs()` (`src/discovery/subnet.ts`, reads `os.networkInterfaces()`
+  at runtime — RFC1918 only, `/22` or smaller; never hardcoded) and sweeps them. Explicit `lanHosts`
+  override; each entry may be a host, CIDR (`10.0.1.0/24`), or last-octet range (`10.0.1.10-50`),
+  expanded by `expandHosts()` (capped at 1024). `discoverLan` probes `hosts × probePorts` with a worker
+  pool (`runBounded`): a high `concurrency` (128), short timeout (400 ms), and a `livenessFirst` gate —
+  one cheap probe per address skips the full adapter fan-out on dead IPs, so a dead origin costs a single
+  socket. A full `/24` (~1778 origins) drops from ~44 s to ~3 s. Results merge/de-dupe into localhost — no mDNS.
+  `CrossbarSettings` is **owned by `ServerRegistry`** (loaded from / persisted to `crossbar.json` on
+  every mutation, so a server add/toggle never clobbers it) and editable from `/crossbar → ⚙ Discovery
+  settings`. `discover()` reads `registry.getSettings()` at call time, so edits apply on the next scan.
 - **Per origin:** run the probe-order fingerprint chain (CAPABILITY-MATRIX §"probe order"); pick the
   highest-confidence adapter; fall back to `openai-generic` when only `/v1/models` matches.
 - **Short timeouts** (e.g. 600ms) and bounded concurrency; a refused port returns `status:0` fast.
@@ -137,16 +157,20 @@ Overlay via `ctx.ui.custom<T>(factory, { overlay:true, overlayOptions })` using 
   [Discovered]   Ollama (localhost:11434)  ✓ healthy
                  LM Studio (localhost:1234) (added)
   [Registered]   vLLM (192.168.1.5:8000)   (added · not discovered)   ← offline servers stay manageable
+  [Disabled]     llama.cpp (192.168.1.9:8080) (disabled)              ← can be re-enabled
+  [Rescan]       ⟳ Rescan for servers
   [Manual add]   + Add server…  → input URL → optional API key (no-auth toggle) → Test connection
-  → new server:  fingerprint → health → listModels → pick default model → save (registry + auth.json)
-  → added server: Manage overlay (capability-filtered)
+  → new server:  fingerprint → listModels → optional "select in Pi" → save + register immediately
+  → added server: persistent Manage overlay (capability-filtered) → Back/Esc returns to server list
 ```
 
-- **New server** path: fingerprint → list models → pick default → save.
+- **New server** path: fingerprint → list chat models → optionally select the current Pi model →
+  save and register immediately.
 - **Already-registered** path opens the **Manage overlay** (`buildManageItems` → `capabilityActions`):
-  switch / load / unload / inspect (capability-gated) · **enable/disable** (toggles registration without
-  forgetting the server) · **remove** (unregisters + deletes the key). Capability-less backends (vLLM,
-  OpenAI, Anthropic, generic) show only enable/disable + remove.
+  switch / load / unload / loaded-model detail view (capability-gated) · **enable/disable** (toggles
+  registration without forgetting the server) · **remove** (unregisters + deletes the key) · **Back**.
+  Disabled servers hide operational actions until re-enabled. Capability-less backends show only
+  enable/disable + remove + Back.
 - Capability-driven: actions are hidden via the `canSwitch`/`canLoadUnload`/`canIntrospect` guards.
 - Test-connection uses the same `Probe` + adapter `health`/`listModels` as production.
 - Cloud keys (OpenAI/Anthropic) can still be entered via stock `/login`; Crossbar's registered models

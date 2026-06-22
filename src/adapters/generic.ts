@@ -92,7 +92,7 @@ class GenericAdapter implements BackendAdapter {
   /**
    * GET /v1/models → map data[].id to ModelDescriptor.
    * Conservative defaults are applied (contextWindow 8192, maxTokens 4096, input ["text"]).
-   * Model IDs containing "embed" are flagged as embeddings models (excluded from chat registration).
+   * Common embedding/reranking model families are excluded from chat registration.
    * Throws on non-ok / 401 / status:0.
    */
   async listModels(
@@ -118,7 +118,10 @@ class GenericAdapter implements BackendAdapter {
     return body.data
       .filter((item): item is { id: string } => typeof item?.id === "string")
       .map((item): ModelDescriptor => {
-        const isEmbedding = item.id.toLowerCase().includes("embed");
+        const normalizedId = item.id.toLowerCase();
+        const isEmbedding =
+          /(^|[/:._-])(embed|embedding|bge|gte|e5|reranker)([/:._-]|$)/.test(normalizedId) ||
+          normalizedId.includes("nomic-embed");
         return {
           id: item.id,
           name: item.id,

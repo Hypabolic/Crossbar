@@ -8,7 +8,7 @@
  * Session wiring (session_start poll, session_shutdown cleanup) is Wave C and is NOT here.
  */
 
-import type { CrossbarConfigFile, HealthState, ServerCredential, ServerRecord } from "../core/types.ts";
+import type { CrossbarConfigFile, CrossbarSettings, HealthState, ModelDescriptor, ServerCredential, ServerRecord } from "../core/types.ts";
 import type { CredentialStore } from "./persistence.ts";
 
 export interface RegistryDeps {
@@ -27,6 +27,8 @@ export interface HealthCachePatch {
 
 export class ServerRegistry {
   private readonly records: Map<string, ServerRecord> = new Map();
+  /** Persisted discovery settings (LAN toggle, hosts, probe ports). */
+  private settings: CrossbarSettings | undefined;
   /** Ephemeral, non-persisted health snapshot per server id (refreshed by the poll). */
   private readonly health: Map<string, HealthState> = new Map();
   private readonly store: CredentialStore;
@@ -49,6 +51,25 @@ export class ServerRegistry {
     for (const record of config.servers) {
       this.records.set(record.id, record);
     }
+    this.settings = config.settings;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Discovery settings (persisted alongside servers)
+  // ---------------------------------------------------------------------------
+
+  /** Current discovery settings, or undefined when none are configured. */
+  getSettings(): CrossbarSettings | undefined {
+    return this.settings;
+  }
+
+  /**
+   * Replace the discovery settings and persist. An empty object is normalised to
+   * `undefined` so crossbar.json stays clean when everything is at its default.
+   */
+  async setSettings(settings: CrossbarSettings): Promise<void> {
+    this.settings = Object.keys(settings).length > 0 ? settings : undefined;
+    await this.flush();
   }
 
   // ---------------------------------------------------------------------------
@@ -106,6 +127,19 @@ export class ServerRegistry {
     await this.update(id, { enabled });
   }
 
+  /**
+   * Persistently update the cached model catalogue for a server.
+   * Use this when the model list has materially changed and the new catalogue
+   * must survive a process restart. Unlike updateHealthCache, this calls flush().
+   * No-op if the id is unknown.
+   */
+  async setLastKnownModels(id: string, models: ModelDescriptor[]): Promise<void> {
+    const existing = this.records.get(id);
+    if (!existing) return;
+    this.records.set(id, { ...existing, lastKnownModels: models });
+    await this.flush();
+  }
+
   // ---------------------------------------------------------------------------
   // Health / model cache (non-persisting fast-path — called from the poll loop)
   // ---------------------------------------------------------------------------
@@ -157,6 +191,12 @@ export class ServerRegistry {
   // ---------------------------------------------------------------------------
 
   private async flush(): Promise<void> {
-    await this.persist({ version: 1, servers: this.list() });
+    const config: CrossbarConfigFile = { version: 1, servers: this.list() };
+    // Preserve discovery settings across every mutation — otherwise any server
+    // add/remove/toggle would drop a user's LAN/probe-port configuration.
+    if (this.settings && Object.keys(this.settings).length > 0) {
+      config.settings = this.settings;
+    }
+    await this.persist(config);
   }
 }

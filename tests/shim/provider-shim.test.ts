@@ -8,16 +8,21 @@
  *   - Embedding models are filtered out — never appear in Pi models[].
  *   - Every output model is a valid PiModelEntry shape.
  *   - No plaintext API key appears anywhere in the output.
- *   - The apiKey field is always the env-var sentinel form ("$CROSSBAR_...").
+ *   - Keyed providers use the env-var sentinel form ("$CROSSBAR_...").
+ *   - No-auth providers use a resolved, non-secret placeholder key.
  */
 
 import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
-import { buildProviderConfig, registerServer, unregisterServer, reRegisterServer } from "../../src/shim/provider-shim.ts";
+import { buildProviderConfig, registerCachedServer, registerServer, unregisterServer, reRegisterServer } from "../../src/shim/provider-shim.ts";
 import { ollamaAdapter } from "../../src/adapters/ollama.ts";
 import { openaiAdapter } from "../../src/adapters/openai.ts";
 import { envVarFor } from "../../src/registry/ids.ts";
 import type { ServerRecord, DiscoveredServer, ModelDescriptor } from "../../src/core/types.ts";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  AuthStorage,
+  ModelRegistry,
+  type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import type { ServerRegistry } from "../../src/registry/registry.ts";
 
 // ---------------------------------------------------------------------------
@@ -171,16 +176,13 @@ describe("buildProviderConfig — Ollama local no-auth", () => {
     }
   });
 
-  it("apiKey is always the $ENV sentinel (not plaintext, not undefined)", () => {
+  it("uses a resolved placeholder API key so Pi permits requests", () => {
     const cfg = buildProviderConfig(ollamaRecord, ollamaServer, [chatModel]);
-    const expectedSentinel = "$" + envVarFor(ollamaRecord.id);
-    expect(cfg.apiKey).toBe(expectedSentinel);
-    // CROSSBAR_OLLAMA_127_0_0_1_11434
-    expect(cfg.apiKey).toMatch(/^\$CROSSBAR_/);
+    expect(cfg.apiKey).toBe("crossbar-no-auth");
   });
 
-  it("no-auth: apiKey sentinel does NOT contain any literal key value", () => {
-    const cfg = buildProviderConfig(ollamaRecord, ollamaServer, [chatModel], { hasApiKey: false });
+  it("no-auth: placeholder does NOT contain any literal key value", () => {
+    const cfg = buildProviderConfig(ollamaRecord, ollamaServer, [chatModel]);
     // The output must never contain a real API key in plaintext
     const serialised = JSON.stringify(cfg);
     expect(serialised).not.toMatch(/sk-[a-zA-Z0-9]/);
@@ -204,22 +206,21 @@ describe("buildProviderConfig — Ollama local no-auth", () => {
 
 describe("buildProviderConfig — OpenAI cloud with key", () => {
   it("sets correct api type (openai-completions)", () => {
-    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel], { hasApiKey: true });
+    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel]);
     expect(cfg.api).toBe("openai-completions");
   });
 
   it("uses the env-var sentinel as apiKey — never the literal key", () => {
-    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel], { hasApiKey: true });
+    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel]);
     const expectedSentinel = "$" + envVarFor(openaiRecord.id);
     expect(cfg.apiKey).toBe(expectedSentinel);
     // $CROSSBAR_OPENAI
     expect(cfg.apiKey).toBe("$CROSSBAR_OPENAI");
   });
 
-  it("no plaintext key in serialised output even when hasApiKey=true", () => {
+  it("never includes a plaintext key in the serialised provider config", () => {
     const secretKey = "sk-proj-supersecret-12345";
-    // A caller might pass `hasApiKey: true`; the plaintext must NOT be embedded in config
-    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel], { hasApiKey: true });
+    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel]);
     const serialised = JSON.stringify(cfg);
     expect(serialised).not.toContain(secretKey);
     // The apiKey field in the output is the $ENV reference, not a real key
@@ -227,14 +228,14 @@ describe("buildProviderConfig — OpenAI cloud with key", () => {
   });
 
   it("excludes embedding models", () => {
-    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel, openaiEmbedModel], { hasApiKey: true });
+    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel, openaiEmbedModel]);
     const ids = (cfg.models ?? []).map((m) => m.id);
     expect(ids).toContain("gpt-4o");
     expect(ids).not.toContain("text-embedding-3-large");
   });
 
   it("model entries are valid PiModelEntry shapes", () => {
-    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel], { hasApiKey: true });
+    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel]);
     for (const model of cfg.models ?? []) {
       expect(typeof model.id).toBe("string");
       expect(typeof model.name).toBe("string");
@@ -250,12 +251,12 @@ describe("buildProviderConfig — OpenAI cloud with key", () => {
   });
 
   it("baseUrl matches adapter.inferenceBaseUrl", () => {
-    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel], { hasApiKey: true });
+    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel]);
     expect(cfg.baseUrl).toBe(openaiAdapter.inferenceBaseUrl(openaiServer));
   });
 
   it("name matches record.label", () => {
-    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel], { hasApiKey: true });
+    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel]);
     expect(cfg.name).toBe("OpenAI");
   });
 });
@@ -264,22 +265,40 @@ describe("buildProviderConfig — OpenAI cloud with key", () => {
 // buildProviderConfig — env var sentinel contract
 // ---------------------------------------------------------------------------
 
-describe("apiKey sentinel derivation", () => {
-  it("sentinel for ollama local is $CROSSBAR_OLLAMA_127_0_0_1_11434", () => {
+describe("apiKey derivation", () => {
+  it("placeholder for ollama local is a resolved literal", () => {
     const cfg = buildProviderConfig(ollamaRecord, ollamaServer, [chatModel]);
-    expect(cfg.apiKey).toBe("$CROSSBAR_OLLAMA_127_0_0_1_11434");
+    expect(cfg.apiKey).toBe("crossbar-no-auth");
   });
 
   it("sentinel for openai cloud is $CROSSBAR_OPENAI", () => {
-    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel], { hasApiKey: true });
+    const cfg = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel]);
     expect(cfg.apiKey).toBe("$CROSSBAR_OPENAI");
   });
 
-  it("sentinel always starts with $CROSSBAR_", () => {
+  it("only keyed providers use a $CROSSBAR_ sentinel", () => {
     const cfg1 = buildProviderConfig(ollamaRecord, ollamaServer, [chatModel]);
-    const cfg2 = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel], { hasApiKey: true });
-    expect(cfg1.apiKey).toMatch(/^\$CROSSBAR_/);
+    const cfg2 = buildProviderConfig(openaiRecord, openaiServer, [gpt4oModel]);
+    expect(cfg1.apiKey).not.toMatch(/^\$CROSSBAR_/);
     expect(cfg2.apiKey).toMatch(/^\$CROSSBAR_/);
+  });
+});
+
+describe("Pi request-auth integration", () => {
+  it("treats a no-auth Crossbar model as available and resolves the placeholder", async () => {
+    const authStorage = AuthStorage.inMemory();
+    const modelRegistry = ModelRegistry.inMemory(authStorage);
+    const config = buildProviderConfig(ollamaRecord, ollamaServer, [chatModel]);
+
+    modelRegistry.registerProvider(ollamaRecord.id, config);
+    const model = modelRegistry.find(ollamaRecord.id, chatModel.id);
+
+    expect(model).toBeDefined();
+    expect(modelRegistry.hasConfiguredAuth(model!)).toBe(true);
+    await expect(modelRegistry.getApiKeyAndHeaders(model!)).resolves.toEqual({
+      ok: true,
+      apiKey: "crossbar-no-auth",
+    });
   });
 });
 
@@ -337,6 +356,15 @@ describe("registerServer", () => {
     // Serialised form must not contain the plaintext
     expect(JSON.stringify(config)).not.toContain(plaintextKey);
   });
+
+  it("rejects a keyed server when its stored credential is missing", async () => {
+    const { pi, registerProvider } = makePi();
+    const registry = makeRegistry();
+
+    await expect(registerServer(pi, registry, openaiRecord, [gpt4oModel]))
+      .rejects.toThrow("API key missing");
+    expect(registerProvider).not.toHaveBeenCalled();
+  });
 });
 
 describe("unregisterServer", () => {
@@ -369,5 +397,93 @@ describe("reRegisterServer", () => {
     await reRegisterServer(pi, registry, ollamaRecord, updatedModels);
     const config = registerProvider.mock.calls[0]?.[1] as { models: Array<{ id: string }> };
     expect(config.models[0]?.id).toBe("llama3:70b");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unit: keyed availability (plan) — uses real ModelRegistry + AuthStorage
+// via registerCachedServer to exercise the exact buildProviderConfig mapping.
+// ---------------------------------------------------------------------------
+
+describe("keyed availability (real ModelRegistry + registerCachedServer)", () => {
+  const keyedId = "crossbar-openai";
+  const keyedModelId = "gpt-4o";
+  const keyedChatModel: ModelDescriptor = gpt4oModel;
+
+  const keyedServerRecord: ServerRecord = {
+    ...openaiRecord,
+    lastKnownModels: [keyedChatModel],
+  };
+
+  function makeRegisteringPi(mr: ReturnType<typeof ModelRegistry.inMemory>) {
+    return {
+      registerProvider: (name: string, config: any) => mr.registerProvider(name, config),
+    } as unknown as ExtensionAPI;
+  }
+
+  it("keyed cached provider + stored credential → model is available (getAvailable + hasConfiguredAuth)", async () => {
+    const authStorage = AuthStorage.inMemory();
+    authStorage.set(keyedId, { type: "api_key", key: "sk-test-123" });
+    const mr = ModelRegistry.inMemory(authStorage);
+    const pi = makeRegisteringPi(mr);
+
+    const registered = registerCachedServer(pi, keyedServerRecord, keyedServerRecord.lastKnownModels!);
+    expect(registered).toBe(true);
+
+    const model = mr.find(keyedId, keyedModelId);
+    expect(model).toBeDefined();
+    expect(model!.provider).toBe(keyedId);
+    expect(mr.hasConfiguredAuth(model!)).toBe(true);
+    expect(mr.getAvailable().some((m) => m.id === keyedModelId && m.provider === keyedId)).toBe(true);
+  });
+
+  it("keyed cached provider WITHOUT stored credential → registered but unavailable, no crash", async () => {
+    const authStorage = AuthStorage.inMemory(); // deliberately no key for this id
+    const mr = ModelRegistry.inMemory(authStorage);
+    const pi = makeRegisteringPi(mr);
+
+    const registered = registerCachedServer(pi, keyedServerRecord, keyedServerRecord.lastKnownModels!);
+    expect(registered).toBe(true);
+
+    const model = mr.find(keyedId, keyedModelId);
+    expect(model).toBeDefined(); // still registered via sentinel
+    expect(model!.provider).toBe(keyedId);
+    expect(mr.hasConfiguredAuth(model!)).toBe(false);
+    expect(mr.getAvailable().some((m) => m.id === keyedModelId && m.provider === keyedId)).toBe(false);
+  });
+
+  it("no-auth cached provider resolves with crossbar-no-auth and is available", async () => {
+    const authStorage = AuthStorage.inMemory();
+    const mr = ModelRegistry.inMemory(authStorage);
+    const pi = makeRegisteringPi(mr);
+
+    const registered = registerCachedServer(pi, ollamaRecord, [chatModel]);
+    expect(registered).toBe(true);
+
+    const model = mr.find(ollamaRecord.id, chatModel.id);
+    expect(model).toBeDefined();
+    expect(mr.hasConfiguredAuth(model!)).toBe(true);
+    await expect(mr.getApiKeyAndHeaders(model!)).resolves.toEqual({ ok: true, apiKey: "crossbar-no-auth" });
+    expect(mr.getAvailable().some((m) => m.id === chatModel.id && m.provider === ollamaRecord.id)).toBe(true);
+  });
+
+  it("keyed-without-key registration does not affect a no-auth provider", async () => {
+    const authStorage = AuthStorage.inMemory(); // keyed id has no entry
+    const mr = ModelRegistry.inMemory(authStorage);
+    const pi = makeRegisteringPi(mr);
+
+    registerCachedServer(pi, keyedServerRecord, keyedServerRecord.lastKnownModels!);
+    registerCachedServer(pi, ollamaRecord, [chatModel]);
+
+    const noAuthModel = mr.find(ollamaRecord.id, chatModel.id);
+    const keyedModel = mr.find(keyedId, keyedModelId);
+
+    expect(noAuthModel).toBeDefined();
+    expect(keyedModel).toBeDefined();
+    expect(mr.hasConfiguredAuth(noAuthModel!)).toBe(true);
+    expect(mr.hasConfiguredAuth(keyedModel!)).toBe(false);
+    const availableIds = mr.getAvailable().map((m) => `${m.provider}/${m.id}`);
+    expect(availableIds.some((s) => s.includes(ollamaRecord.id))).toBe(true);
+    expect(availableIds.some((s) => s.includes(keyedId))).toBe(false);
   });
 });

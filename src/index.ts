@@ -16,11 +16,13 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
-import type { CrossbarSettings, DiscoveredServer, ModelDescriptor, ServerRecord } from "./core/index.ts";
+import type { DiscoveredServer, ModelDescriptor, ServerRecord } from "./core/index.ts";
 import { adapterFor, DISCOVERY_ADAPTERS } from "./adapters/index.ts";
 import { discoverLan, discoverLocalhost } from "./discovery/engine.ts";
+import { expandHosts, localSubnetCidrs } from "./discovery/subnet.ts";
 import { createProbe } from "./discovery/probe.ts";
-import { pollAll } from "./poll.ts";
+import { catalogueChanged, pollAll } from "./poll.ts";
+import { preloadCachedProviders } from "./preload.ts";
 import { loadConfig, saveConfig } from "./registry/persistence.ts";
 import { createPiCredentialStore } from "./registry/pi-credential-store.ts";
 import { serverId } from "./registry/ids.ts";
@@ -42,28 +44,47 @@ function recordToServer(record: ServerRecord): DiscoveredServer {
   };
 }
 
-export default function crossbar(pi: ExtensionAPI): void {
+export default async function crossbar(pi: ExtensionAPI): Promise<void> {
+  // Phase 1: register saved providers before Pi resolves model scopes.
+  await preloadCachedProviders(pi);
+
   let registry: ServerRegistry | undefined;
   let widget: LoadedWidgetHandle | undefined;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
-  let settings: CrossbarSettings | undefined;
 
   // Discovery honours CrossbarSettings: custom probe ports always, plus opt-in LAN
-  // host probing (lanDiscovery + lanHosts). Reads `settings` at call time so it
-  // picks up the config loaded in session_start.
+  // probing. When LAN discovery is on and no explicit hosts are given, sweep the
+  // machine's own private subnet(s); explicit hosts/CIDRs override that. Reads
+  // settings from the registry at call time so settings-overlay edits apply next scan.
   const discover = async (): Promise<DiscoveredServer[]> => {
     const adapters = [...DISCOVERY_ADAPTERS];
-    const opts =
-      settings?.probePorts && settings.probePorts.length > 0
-        ? { ports: settings.probePorts }
-        : undefined;
+    const settings = registry?.getSettings();
+    const ports =
+      settings?.probePorts && settings.probePorts.length > 0 ? settings.probePorts : undefined;
 
-    const local = await discoverLocalhost(adapters, opts);
-    if (!settings?.lanDiscovery || !settings.lanHosts || settings.lanHosts.length === 0) {
+    const local = await discoverLocalhost(adapters, ports ? { ports } : undefined);
+    if (!settings?.lanDiscovery) {
       return local;
     }
-    // Merge LAN results, de-duplicating against localhost by origin.
-    const lan = await discoverLan(adapters, settings.lanHosts, opts);
+
+    // Explicit hosts/CIDRs win; otherwise auto-scan the local subnet(s).
+    const specs =
+      settings.lanHosts && settings.lanHosts.length > 0 ? settings.lanHosts : localSubnetCidrs();
+    const { hosts } = expandHosts(specs);
+    if (hosts.length === 0) {
+      return local; // LAN on but nothing to probe (no hosts and no detectable subnet)
+    }
+
+    // A subnet sweep is hundreds of origins — probe many at once with a short
+    // per-probe timeout (LAN RTT is tiny). `livenessFirst` makes each dead address
+    // cost a single socket, so the high concurrency stays within fd limits and the
+    // whole /24 finishes in a few seconds.
+    const lan = await discoverLan(adapters, hosts, {
+      ...(ports ? { ports } : {}),
+      concurrency: 128,
+      timeoutMs: 400,
+      livenessFirst: true,
+    });
     const seen = new Set(local.map((s) => s.baseUrl));
     return [...local, ...lan.filter((s) => !seen.has(s.baseUrl))];
   };
@@ -75,14 +96,21 @@ export default function crossbar(pi: ExtensionAPI): void {
     let models: ModelDescriptor[] = record.lastKnownModels ?? [];
     try {
       const probe = createProbe(record.baseUrl, { auth: cred });
-      models = await adapter.listModels(recordToServer(record), cred, probe);
-      reg.updateHealthCache(record.id, { models, lastSeenAt: Date.now() });
+      const liveModels = await adapter.listModels(recordToServer(record), cred, probe);
+      // Persist only when the catalogue changed in a registration-relevant way.
+      if (catalogueChanged(record.lastKnownModels, liveModels)) {
+        await reg.setLastKnownModels(record.id, liveModels);
+      }
+      // Always update lastSeenAt ephemerally (no persist).
+      reg.updateHealthCache(record.id, { lastSeenAt: Date.now() });
+      models = liveModels;
     } catch {
       // Offline / unreachable — fall back to last-known models (may be empty).
     }
-    if (models.length === 0) return 0; // nothing registrable (server offline, no cache)
+    const chatModelCount = models.filter((model) => !model.embeddings).length;
+    if (chatModelCount === 0) return 0; // nothing registrable (server offline, no cache)
     await registerServer(pi, reg, record, models);
-    return models.length;
+    return chatModelCount;
   }
 
   pi.on("session_start", async (_event, ctx: ExtensionContext) => {
@@ -95,8 +123,7 @@ export default function crossbar(pi: ExtensionAPI): void {
     const store = createPiCredentialStore(ctx.modelRegistry.authStorage);
     const reg = new ServerRegistry({ store, persist: (cfg) => saveConfig(cfg) });
     const cfg = await loadConfig();
-    reg.load(cfg);
-    settings = cfg.settings;
+    reg.load(cfg); // registry now owns discovery settings (cfg.settings)
     registry = reg;
 
     // 1) Register every enabled server from the saved config.
@@ -163,6 +190,14 @@ export default function crossbar(pi: ExtensionAPI): void {
       pollTimer = undefined;
     }
     // Unwind our Pi provider registrations so a reload starts clean.
+    // Replacement runtimes (reload/new/resume/fork) execute the async factory
+    // again (via resourceLoader.reload + fresh ExtensionRunner), which calls
+    // preloadCachedProviders from the on-disk cache BEFORE the replacement
+    // session_start. Preload registrations are flushed into ModelRegistry on
+    // bindCore (wrapped try/catch per Pi). Shutdown unregs + factory re-preloads
+    // by stable id therefore leaves the replacement with its cached providers.
+    // (No cross-runtime gap in final state; transient unreg window is inherent
+    // to reload and only affects in-process interactive queries.)
     if (registry) {
       for (const record of registry.list()) {
         try {

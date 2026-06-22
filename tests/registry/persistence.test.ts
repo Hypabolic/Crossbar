@@ -106,3 +106,47 @@ describe("saveConfig", () => {
     expect(loaded).toEqual({ version: 1, servers: [] });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Atomicity — concurrent readers must never observe a partial/torn file
+// ---------------------------------------------------------------------------
+
+describe("saveConfig atomicity", () => {
+  /** N distinct, non-empty records so a snapshot's server count identifies it. */
+  function recordsOfLength(n: number): ServerRecord[] {
+    return Array.from({ length: n }, (_, i) => ({
+      ...minimalRecord,
+      id: `crossbar-ollama-host-${i}`,
+      baseUrl: `http://127.0.0.1:${11434 + i}`,
+    }));
+  }
+
+  it("concurrent readers never observe a partial/corrupt file", async () => {
+    // The temp-file + atomic rename in saveConfig must guarantee that every
+    // reader sees either the old or the new COMPLETE file, never a half-written
+    // one. A torn read would fail JSON.parse and loadConfig would fall back to
+    // the empty config (0 servers) — which we never write, so it's detectable.
+    const writeLengths = [1, 2, 3];
+
+    // Seed a valid file so the very first readers have a complete snapshot.
+    await saveConfig({ version: 1, servers: recordsOfLength(1) }, { dir });
+
+    const writers = Array.from({ length: 40 }, (_, i) =>
+      saveConfig(
+        { version: 1, servers: recordsOfLength(writeLengths[i % writeLengths.length]!) },
+        { dir },
+      ),
+    );
+    const readers = Array.from({ length: 150 }, () => loadConfig({ dir }));
+
+    const [, ...reads] = await Promise.all([Promise.all(writers), ...readers]);
+
+    for (const cfg of reads as CrossbarConfigFile[]) {
+      expect(cfg.version).toBe(1);
+      expect(Array.isArray(cfg.servers)).toBe(true);
+      // Must equal one of the committed snapshots — never the 0-length empty
+      // fallback that a partial read would produce.
+      expect(writeLengths).toContain(cfg.servers.length);
+    }
+  });
+});

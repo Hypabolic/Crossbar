@@ -65,9 +65,11 @@ Then start Pi and run `/crossbar`.
 
 ## Usage
 
-- **`/crossbar`** (alias **`/local`**) — open the onboarding overlay: pick from auto-discovered servers
-  or add one manually (URL + optional API key / no-auth toggle), test the connection, choose a model,
-  and save.
+- **`/crossbar`** (alias **`/local`**) — open the server manager. Discover/rescan servers, add one
+  manually, enable/disable or remove saved servers, switch/load/unload models where supported, and
+  inspect a server's currently loaded models. Esc/Back from a server returns to the server list.
+- Adding a server registers its chat models immediately. Choosing **Select model to use in Pi**
+  also makes that model current; Esc skips selection while keeping the server registered.
 - **Auto-discovery** runs on session start: reachable no-auth servers on localhost are registered
   automatically; keyed servers are surfaced with a prompt to add them.
 - Registered models appear in Pi's standard **`/model`** picker and `/login` provider list.
@@ -75,7 +77,14 @@ Then start Pi and run `/crossbar`.
   `(last-known)` suffix where a backend can't report live state).
 
 LAN discovery (beyond localhost) is **off by default** — no backend advertises over mDNS, so Crossbar
-never scans your network unless you opt in.
+never touches your network unless you opt in. Toggle it (and edit the LAN host / probe-port lists)
+from **`/crossbar` → ⚙ Discovery settings**; changes are saved to `crossbar.json` and apply on the
+next scan. When enabled with no explicit hosts, Crossbar **auto-detects your machine's own private
+subnet** (e.g. `10.0.0.0/24`, derived at runtime from the system's network interfaces — never
+hardcoded) and sweeps it. You can override that by entering specific hosts, a CIDR (`10.0.1.0/24`),
+or a range (`10.0.1.10-50`); the expansion is capped at 1024 addresses. A full `/24` sweep is a few
+seconds to ~20s depending on how many `probePorts` are set — narrow the port list to your backend's
+port to make it fast.
 
 ## How it works
 
@@ -84,8 +93,16 @@ never scans your network unless you opt in.
   most specific match. The generic adapter is the low-confidence fallback.
 - **Registration** maps discovered models onto Pi's built-in `openai-completions` / `anthropic-messages`
   providers via `pi.registerProvider` — Crossbar writes no streaming code for OpenAI-compatible servers.
-- **Persistence** keeps non-secret server metadata in `~/.pi/agent/crossbar.json`; **API keys live only
-  in Pi's `auth.json`** (mode `0600`), keyed by the server's provider id, exactly like Pi's own creds.
+- **Two-phase startup**: the async extension factory runs *before* Pi resolves models and preloads
+  any enabled servers that have a persisted `lastKnownModels` catalogue (see `src/preload.ts` +
+  `registerCachedServer`). This makes saved models available to `--list-models`, print/JSON/RPC,
+  CLI `--model` selection, and `--offline` runs with zero network or UI. `session_start` still
+  performs live refresh, auto-discovery, polling, and widget installation.
+- **Persistence** keeps non-secret server metadata (including `lastKnownModels`) in
+  `~/.pi/agent/crossbar.json`; **API keys live only in Pi's `auth.json`** (mode `0600`), keyed by
+  the server's provider id. A brand-new server with no cached catalogue cannot be selected
+  programmatically until an interactive `/crossbar` add or discovery persists its models (inherent
+  cold-start limitation).
 
 ## Security
 
