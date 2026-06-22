@@ -24,12 +24,14 @@ import { Container, type SelectItem, SelectList, Text, matchesKey } from "@earen
 
 import type { BackendAdapter } from "../core/backend-adapter.ts";
 import { canIntrospect, canLoadUnload, canSwitch } from "../core/backend-adapter.ts";
-import type { DiscoveredServer, LoadedState, ModelDescriptor, ServerRecord } from "../core/types.ts";
+import type { CrossbarSettings, DiscoveredServer, LoadedState, ModelDescriptor, ServerRecord } from "../core/types.ts";
 import type { ServerRegistry } from "../registry/registry.ts";
 import { serverId } from "../registry/ids.ts";
 import { adapterFor } from "../adapters/index.ts";
 import { registerServer, unregisterServer } from "../shim/provider-shim.ts";
 import { createProbe } from "../discovery/probe.ts";
+import { expandHosts, localSubnetCidrs } from "../discovery/subnet.ts";
+import { catalogueChanged } from "../poll.ts";
 
 // ─── Pure helpers ────────────────────────────────────────────────────────────
 
@@ -43,9 +45,25 @@ function hostPortOf(baseUrl: string): string {
   }
 }
 
-/** Capitalise a backend kind for display, e.g. "lmstudio" → "Lmstudio". */
+const KIND_LABELS: Partial<Record<ServerRecord["kind"], string>> = {
+  ollama: "Ollama",
+  lmstudio: "LM Studio",
+  llamacpp: "llama.cpp",
+  llamaswap: "llama-swap",
+  vllm: "vLLM",
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  tabbyapi: "TabbyAPI",
+  koboldcpp: "KoboldCpp",
+  oobabooga: "oobabooga",
+  jan: "Jan",
+  llamafile: "llamafile",
+  "openai-generic": "OpenAI-compatible",
+};
+
+/** Human-readable backend name for compact selector labels. */
 function kindLabelOf(kind: string): string {
-  return kind.charAt(0).toUpperCase() + kind.slice(1);
+  return KIND_LABELS[kind as ServerRecord["kind"]] ?? kind;
 }
 
 /**
@@ -55,7 +73,7 @@ function kindLabelOf(kind: string): string {
  *     "(added)" suffix so the user can tell new from known;
  *   - registered servers that are NOT currently discovered (e.g. offline), so they
  *     can still be managed/removed;
- *   - a sentinel "Add manually" entry, always last.
+ *   - rescan and manual-add actions, always last.
  *
  * Selecting any already-registered entry opens the manage overlay; selecting a new
  * discovered entry or the sentinel runs the add flow.
@@ -64,39 +82,53 @@ export function buildDiscoveredItems(
   discovered: DiscoveredServer[],
   existing: ServerRecord[],
 ): SelectItem[] {
-  const existingIds = new Set(existing.map((r) => r.id));
+  const existingById = new Map(existing.map((record) => [record.id, record]));
   const discoveredUrls = new Set(discovered.map((s) => s.baseUrl));
 
   const items: SelectItem[] = discovered.map((server): SelectItem => {
     const id = serverId(server.kind, server.baseUrl);
-    const isAdded = existingIds.has(id);
+    const saved = existingById.get(id);
+    const isAdded = saved !== undefined;
 
-    // Compose a label: "[kind] host:port  ✓ healthy" or "(added)"
-    const healthMark = isAdded ? "(added)" : "✓ healthy";
     const label = `${kindLabelOf(server.kind)} (${hostPortOf(server.baseUrl)})`;
 
     return {
       value: server.baseUrl,
-      label: isAdded ? `${label}  (added)` : label,
+      label: saved
+        ? `${label}  (${saved.enabled ? "added" : "disabled"})`
+        : label,
       description: isAdded
-        ? `Already registered · ${healthMark}`
-        : `${healthMark} · auth: ${server.auth}${server.version ? ` · v${server.version}` : ""}`,
+        ? saved.enabled
+          ? "Already registered · ✓ healthy"
+          : "Saved but disabled · server is reachable"
+        : `✓ healthy · auth: ${server.auth}${server.version ? ` · v${server.version}` : ""}`,
     };
   });
 
-  // Append registered servers that weren't discovered this scan (offline / not
-  // reachable right now) so they remain manageable from the same list.
+  // Append registered servers that weren't discovered this scan (offline,
+  // disabled, or not reachable right now) so they remain manageable.
   for (const record of existing) {
-    if (!record.enabled) continue;
     if (discoveredUrls.has(record.baseUrl)) continue;
     items.push({
       value: record.baseUrl,
-      label: `${kindLabelOf(record.kind)} (${hostPortOf(record.baseUrl)})  (added)`,
-      description: "Registered · not currently discovered",
+      label: `${kindLabelOf(record.kind)} (${hostPortOf(record.baseUrl)})  (${record.enabled ? "added" : "disabled"})`,
+      description: record.enabled
+        ? "Registered · not currently discovered"
+        : "Saved but disabled · select to manage",
     });
   }
 
-  // Always append the manual-add sentinel
+  // Utility actions stay at the bottom of the selector.
+  items.push({
+    value: "__rescan__",
+    label: "⟳ Rescan for servers",
+    description: "Refresh the discovered server list",
+  });
+  items.push({
+    value: "__settings__",
+    label: "⚙ Discovery settings…",
+    description: "LAN discovery, hosts, and probe ports",
+  });
   items.push({
     value: "__manual__",
     label: "＋ Add server…",
@@ -104,6 +136,68 @@ export function buildDiscoveredItems(
   });
 
   return items;
+}
+
+// ─── Discovery-settings helpers ─────────────────────────────────────────────
+
+/**
+ * Parse a user-entered port list ("11434, 8080 1234") into a sorted, de-duplicated
+ * array of valid TCP ports (1–65535). Invalid tokens are dropped; an empty/whitespace
+ * input yields `[]` (meaning "use the per-backend defaults").
+ */
+export function parsePorts(input: string): number[] {
+  const ports: number[] = [];
+  for (const token of input.split(/[\s,]+/)) {
+    if (token.length === 0) continue;
+    const n = Number(token);
+    if (Number.isInteger(n) && n >= 1 && n <= 65535) ports.push(n);
+  }
+  return [...new Set(ports)].sort((a, b) => a - b);
+}
+
+/**
+ * Parse a user-entered host list ("192.168.1.50, nas.local") into a trimmed,
+ * de-duplicated array. Empty input yields `[]`.
+ */
+export function parseHosts(input: string): string[] {
+  return [...new Set(input.split(/[\s,]+/).map((h) => h.trim()).filter((h) => h.length > 0))];
+}
+
+/**
+ * Drop default/empty fields so crossbar.json stays clean: LAN off and empty
+ * host/port lists are simply absent.
+ */
+function cleanSettings(settings: CrossbarSettings): CrossbarSettings {
+  const out: CrossbarSettings = {};
+  if (settings.lanDiscovery) out.lanDiscovery = true;
+  if (settings.lanHosts && settings.lanHosts.length > 0) out.lanHosts = settings.lanHosts;
+  if (settings.probePorts && settings.probePorts.length > 0) out.probePorts = settings.probePorts;
+  return out;
+}
+
+/** Build the discovery-settings menu, reflecting the current values in each label. */
+export function buildSettingsItems(settings: CrossbarSettings): SelectItem[] {
+  const lanOn = settings.lanDiscovery === true;
+  const hosts = settings.lanHosts ?? [];
+  const ports = settings.probePorts ?? [];
+  return [
+    {
+      value: "toggle-lan",
+      label: `LAN discovery: ${lanOn ? "ON" : "OFF"}`,
+      description: lanOn ? "Scanning the LAN for backends" : "Localhost only (default)",
+    },
+    {
+      value: "edit-hosts",
+      label: `LAN hosts: ${hosts.length > 0 ? hosts.join(", ") : "auto (local subnet)"}`,
+      description: "Blank scans your local subnet · accepts IPs, hostnames, or CIDR (10.0.1.0/24)",
+    },
+    {
+      value: "edit-ports",
+      label: `Probe ports: ${ports.length > 0 ? ports.join(", ") : "defaults"}`,
+      description: "Ports scanned on each host (blank = per-backend defaults)",
+    },
+    { value: "back", label: "← Back to servers", description: "Return to the server list" },
+  ];
 }
 
 /**
@@ -161,14 +255,14 @@ export function capabilityActions(
   const actions: { label: string; value: string }[] = [];
 
   if (canSwitch(adapter)) {
-    actions.push({ label: "Switch model", value: "switch" });
+    actions.push({ label: "Switch active model", value: "switch" });
   }
   if (canLoadUnload(adapter)) {
     actions.push({ label: "Load model", value: "load" });
     actions.push({ label: "Unload model", value: "unload" });
   }
   if (canIntrospect(adapter)) {
-    actions.push({ label: "Inspect loaded models", value: "introspect" });
+    actions.push({ label: "View loaded models", value: "introspect" });
   }
 
   return actions;
@@ -176,13 +270,14 @@ export function capabilityActions(
 
 /** One-line hints shown under each manage action. */
 const ACTION_DESCRIPTIONS: Record<string, string> = {
-  switch: "Make a model the active/served one",
+  switch: "Activate it on the server and select it in Pi",
   load: "Load a model into memory",
   unload: "Evict a loaded model from memory",
-  introspect: "Show which models are currently loaded",
+  introspect: "Open a live loaded-model snapshot",
   enable: "Register its models with Pi again",
   disable: "Stop registering its models (keeps the server saved)",
   remove: "Forget this server and delete its stored key",
+  back: "Return to the server list",
 };
 
 /**
@@ -193,7 +288,7 @@ const ACTION_DESCRIPTIONS: Record<string, string> = {
  * only the enable/disable toggle and "Remove server".
  */
 export function buildManageItems(adapter: BackendAdapter, enabled: boolean): SelectItem[] {
-  const items: SelectItem[] = capabilityActions(adapter).map((a) => {
+  const items: SelectItem[] = (enabled ? capabilityActions(adapter) : []).map((a) => {
     const item: SelectItem = { value: a.value, label: a.label };
     const desc = ACTION_DESCRIPTIONS[a.value];
     if (desc !== undefined) item.description = desc;
@@ -208,6 +303,11 @@ export function buildManageItems(adapter: BackendAdapter, enabled: boolean): Sel
     value: "remove",
     label: "Remove server",
     description: ACTION_DESCRIPTIONS["remove"]!,
+  });
+  items.push({
+    value: "back",
+    label: "← Back to servers",
+    description: ACTION_DESCRIPTIONS["back"]!,
   });
   return items;
 }
@@ -293,7 +393,66 @@ function selectOverlay(
   );
 }
 
+/** Render a read-only detail overlay. Enter or Esc returns to the previous menu. */
+function detailOverlay(
+  ctx: ExtensionCommandContext,
+  title: string,
+  lines: string[],
+): Promise<void> {
+  return ctx.ui.custom<void>(
+    (_tui, theme, _kb, done) => {
+      const container = new Container();
+      container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
+      container.addChild(new Text(theme.fg("accent", theme.bold(title))));
+      container.addChild(new Text(""));
+      for (const line of lines) {
+        container.addChild(new Text(line));
+      }
+      container.addChild(new Text(""));
+      container.addChild(new Text(theme.fg("dim", "Enter / Esc  back")));
+      container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
+
+      return {
+        render: (width: number) => container.render(width),
+        invalidate: () => container.invalidate(),
+        handleInput: (data: string) => {
+          if (matchesKey(data, "escape") || matchesKey(data, "return")) {
+            done();
+          }
+        },
+      };
+    },
+    { overlay: true, overlayOptions: { width: "70%" } },
+  );
+}
+
 const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+function chatModels(models: ModelDescriptor[]): ModelDescriptor[] {
+  return models.filter((model) => !model.embeddings);
+}
+
+/** Select a registered Crossbar model as Pi's current model. */
+async function selectPiModel(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  record: ServerRecord,
+  modelId: string,
+): Promise<boolean> {
+  const model = ctx.modelRegistry.find(record.id, modelId);
+  if (!model) {
+    ctx.ui.notify(
+      `Crossbar: ${modelId} is not registered in Pi yet.`,
+      "warning",
+    );
+    return false;
+  }
+  const selected = await pi.setModel(model);
+  if (!selected) {
+    ctx.ui.notify(`Crossbar: Pi could not select ${modelId}.`, "error");
+  }
+  return selected;
+}
 
 /** Fetch a server's models (live, falling back to last-known on failure). */
 async function fetchModels(
@@ -317,6 +476,7 @@ async function fetchModels(
 
 /** Switch the active model or load a model: pick from the list, then call the adapter. */
 async function performModelAction(
+  pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   registry: ServerRegistry,
   record: ServerRecord,
@@ -325,8 +485,9 @@ async function performModelAction(
   const adapter = adapterFor(record.kind);
   const models = await fetchModels(ctx, registry, record);
   if (!models) return;
-  if (models.length === 0) {
-    ctx.ui.notify("Crossbar: server returned no models.", "warning");
+  const selectableModels = chatModels(models);
+  if (selectableModels.length === 0) {
+    ctx.ui.notify("Crossbar: server returned no chat models.", "warning");
     return;
   }
 
@@ -336,7 +497,7 @@ async function performModelAction(
   const modelId = await selectOverlay(
     ctx,
     title,
-    buildModelItems(models.filter((m) => !m.embeddings)),
+    buildModelItems(selectableModels),
     "↑↓ navigate · Enter select · Esc cancel",
   );
   if (!modelId) return;
@@ -357,10 +518,17 @@ async function performModelAction(
       if (!canLoadUnload(adapter)) return;
       await adapter.loadUnload(serverFromRecord(record), cred, modelId, "load", probe);
     }
-    ctx.ui.notify(
-      `Crossbar: ${modelId} ${action === "switch" ? "is now active" : "loaded"}.`,
-      "info",
-    );
+    if (action === "switch") {
+      const selected = await selectPiModel(pi, ctx, record, modelId);
+      ctx.ui.notify(
+        selected
+          ? `Crossbar: ${modelId} is active on the server and selected in Pi.`
+          : `Crossbar: ${modelId} is active on the server; select it from /model.`,
+        selected ? "info" : "warning",
+      );
+    } else {
+      ctx.ui.notify(`Crossbar: ${modelId} loaded.`, "info");
+    }
   } catch (err) {
     ctx.ui.notify(`Crossbar: ${action} failed — ${errMsg(err)}`, "error");
   }
@@ -408,7 +576,12 @@ async function performUnload(
   }
 }
 
-/** Read and report the currently-loaded models for a server. */
+function formatBytes(bytes: number): string {
+  const gib = bytes / (1024 ** 3);
+  return gib >= 0.1 ? `${gib.toFixed(gib >= 10 ? 0 : 1)} GiB` : `${Math.round(bytes / (1024 ** 2))} MiB`;
+}
+
+/** Read and present the currently-loaded models for a server. */
 async function performIntrospect(
   ctx: ExtensionCommandContext,
   registry: ServerRegistry,
@@ -427,18 +600,33 @@ async function performIntrospect(
     return;
   }
   if (state.loadedModelIds.length === 0) {
-    ctx.ui.notify(`Crossbar: ${record.label} has no models loaded.`, "info");
+    await detailOverlay(
+      ctx,
+      `Loaded models — ${record.label}`,
+      ["No models are currently loaded."],
+    );
     return;
   }
-  const summary = state.loadedModelIds
-    .map((id) => {
-      const ctxLen = state.perModel?.[id]?.contextLength;
-      if (ctxLen === undefined) return id;
-      const ctxStr = ctxLen >= 1000 ? `${Math.round(ctxLen / 1000)}k` : `${ctxLen}`;
-      return `${id} (${ctxStr} ctx)`;
-    })
-    .join(", ");
-  ctx.ui.notify(`Crossbar: ${record.label} loaded — ${summary}`, "info");
+  const lines = state.loadedModelIds.flatMap((id, index) => {
+    const info = state.perModel?.[id];
+    const details: string[] = [];
+    if (info?.contextLength !== undefined) {
+      const ctxStr = info.contextLength >= 1000
+        ? `${Math.round(info.contextLength / 1000)}k`
+        : `${info.contextLength}`;
+      details.push(`${ctxStr} context`);
+    }
+    if (info?.vramBytes !== undefined) details.push(`${formatBytes(info.vramBytes)} VRAM`);
+    if (info?.expiresAt !== undefined) {
+      const remainingMs = info.expiresAt - Date.now();
+      details.push(remainingMs > 0 ? `unloads in ${Math.ceil(remainingMs / 60_000)} min` : "unload pending");
+    }
+    return [
+      `${index + 1}. ${id}`,
+      ...(details.length > 0 ? [`   ${details.join(" · ")}`] : []),
+    ];
+  });
+  await detailOverlay(ctx, `Loaded models — ${record.label}`, lines);
 }
 
 /**
@@ -455,15 +643,36 @@ async function performToggleEnabled(
   await registry.setEnabled(record.id, next);
   if (!next) {
     unregisterServer(pi, record);
-    ctx.ui.notify(`Crossbar: ${record.label} disabled — removed from /model.`, "info");
+    ctx.ui.notify(
+      `Crossbar: ${record.label} disabled — removed from /model. If it was active, select another model with /model.`,
+      "info",
+    );
     return;
   }
   const models = await fetchModels(ctx, registry, record);
-  if (models && models.length > 0) {
-    await registerServer(pi, registry, record, models);
-    ctx.ui.notify(`Crossbar: ${record.label} enabled — ${models.length} models in /model.`, "info");
+  const selectableModels = models ? chatModels(models) : [];
+  if (models && selectableModels.length > 0) {
+    try {
+      // Persist the refreshed catalogue (persist-before-register) so the next
+      // process preloads the current model list rather than a stale cache.
+      if (catalogueChanged(record.lastKnownModels, models)) {
+        await registry.setLastKnownModels(record.id, models);
+      }
+      await registerServer(pi, registry, record, models);
+      ctx.ui.notify(
+        `Crossbar: ${record.label} enabled — ${selectableModels.length} models in /model.`,
+        "info",
+      );
+    } catch (err) {
+      await registry.setEnabled(record.id, false);
+      ctx.ui.notify(`Crossbar: could not enable ${record.label} — ${errMsg(err)}`, "error");
+    }
   } else {
-    ctx.ui.notify(`Crossbar: ${record.label} enabled (no models reachable right now).`, "warning");
+    await registry.setEnabled(record.id, false);
+    ctx.ui.notify(
+      `Crossbar: could not enable ${record.label} — no chat models are reachable.`,
+      "warning",
+    );
   }
 }
 
@@ -473,12 +682,16 @@ async function performRemove(
   ctx: ExtensionCommandContext,
   registry: ServerRegistry,
   record: ServerRecord,
-): Promise<void> {
+): Promise<boolean> {
   const confirm = await ctx.ui.select(`Remove ${record.label}?`, ["Cancel", "Remove server"]);
-  if (confirm !== "Remove server") return;
+  if (confirm !== "Remove server") return false;
   unregisterServer(pi, record);
   await registry.remove(record.id);
-  ctx.ui.notify(`Crossbar: removed ${record.label}.`, "info");
+  ctx.ui.notify(
+    `Crossbar: removed ${record.label}. If it was active, select another model with /model.`,
+    "info",
+  );
+  return true;
 }
 
 /**
@@ -492,36 +705,126 @@ export async function openServerActions(
   record: ServerRecord,
 ): Promise<void> {
   const { registry } = deps;
-  const adapter = adapterFor(record.kind);
+  let current = record;
 
-  const choice = await selectOverlay(
-    ctx,
-    `Manage — ${record.label}${record.enabled ? "" : " (disabled)"}`,
-    buildManageItems(adapter, record.enabled),
-    "↑↓ navigate · Enter select · Esc close",
-  );
-  if (!choice) return;
+  while (true) {
+    const adapter = adapterFor(current.kind);
+    const choice = await selectOverlay(
+      ctx,
+      `Manage — ${current.label}${current.enabled ? "" : " (disabled)"}`,
+      buildManageItems(adapter, current.enabled),
+      "↑↓ navigate · Enter select · Esc back",
+    );
+    if (!choice || choice === "back") return;
 
-  switch (choice) {
-    case "switch":
-      await performModelAction(ctx, registry, record, "switch");
-      break;
-    case "load":
-      await performModelAction(ctx, registry, record, "load");
-      break;
-    case "unload":
-      await performUnload(ctx, registry, record);
-      break;
-    case "introspect":
-      await performIntrospect(ctx, registry, record);
-      break;
-    case "enable":
-    case "disable":
-      await performToggleEnabled(pi, ctx, registry, record);
-      break;
-    case "remove":
-      await performRemove(pi, ctx, registry, record);
-      break;
+    switch (choice) {
+      case "switch":
+        await performModelAction(pi, ctx, registry, current, "switch");
+        break;
+      case "load":
+        await performModelAction(pi, ctx, registry, current, "load");
+        break;
+      case "unload":
+        await performUnload(ctx, registry, current);
+        break;
+      case "introspect":
+        await performIntrospect(ctx, registry, current);
+        break;
+      case "enable":
+      case "disable":
+        await performToggleEnabled(pi, ctx, registry, current);
+        break;
+      case "remove":
+        if (await performRemove(pi, ctx, registry, current)) return;
+        break;
+    }
+
+    const refreshed = registry.get(current.id);
+    if (!refreshed) return;
+    current = refreshed;
+  }
+}
+
+/**
+ * Discovery-settings overlay: a persistent menu to toggle LAN discovery and edit
+ * the LAN host / probe-port lists. Each change is written through the registry
+ * (which persists settings alongside servers), and `discover()` reads them at the
+ * next scan. Esc or "Back" returns to the server list.
+ */
+async function openSettings(
+  ctx: ExtensionCommandContext,
+  registry: ServerRegistry,
+): Promise<void> {
+  while (true) {
+    const current = registry.getSettings() ?? {};
+    const choice = await selectOverlay(
+      ctx,
+      "Crossbar — Discovery Settings",
+      buildSettingsItems(current),
+      "↑↓ navigate · Enter select · Esc back",
+    );
+    if (!choice || choice === "back") return;
+
+    if (choice === "toggle-lan") {
+      const next = cleanSettings({ ...current, lanDiscovery: !current.lanDiscovery });
+      await registry.setSettings(next);
+      if (!next.lanDiscovery) {
+        ctx.ui.notify("Crossbar: LAN discovery disabled.", "info");
+      } else if (next.lanHosts && next.lanHosts.length > 0) {
+        ctx.ui.notify(
+          `Crossbar: LAN discovery on — scanning ${next.lanHosts.join(", ")} on the next rescan.`,
+          "info",
+        );
+      } else {
+        // Auto mode: scan the machine's own subnet(s).
+        const subnets = localSubnetCidrs();
+        ctx.ui.notify(
+          subnets.length > 0
+            ? `Crossbar: LAN discovery on — will scan your local subnet (${subnets.join(", ")}) on the next rescan.`
+            : "Crossbar: LAN discovery on, but no local subnet was detected — add hosts or a CIDR below.",
+          subnets.length > 0 ? "info" : "warning",
+        );
+      }
+    } else if (choice === "edit-hosts") {
+      const raw = await ctx.ui.input(
+        "LAN hosts",
+        "IPs, hostnames, or CIDR e.g. 10.0.1.0/24 (blank = auto-scan local subnet)",
+      );
+      if (raw === undefined) continue; // cancelled — leave unchanged
+      const next = cleanSettings({ ...current, lanHosts: parseHosts(raw) });
+      await registry.setSettings(next);
+      const hosts = next.lanHosts ?? [];
+      if (hosts.length === 0) {
+        ctx.ui.notify("Crossbar: LAN hosts cleared — will auto-scan the local subnet.", "info");
+      } else {
+        const { hosts: expanded, truncated } = expandHosts(hosts);
+        ctx.ui.notify(
+          `Crossbar: LAN hosts set — ${hosts.join(", ")} (${expanded.length} addresses).`,
+          "info",
+        );
+        if (truncated) {
+          ctx.ui.notify(
+            "Crossbar: host list is large; the scan is capped at 1024 addresses.",
+            "warning",
+          );
+        }
+      }
+    } else if (choice === "edit-ports") {
+      const raw = await ctx.ui.input(
+        "Probe ports",
+        "comma-separated, e.g. 11434, 8080, 1234 (blank = per-backend defaults)",
+      );
+      if (raw === undefined) continue; // cancelled — leave unchanged
+      const ports = parsePorts(raw);
+      const next = cleanSettings({ ...current, probePorts: ports });
+      await registry.setSettings(next);
+      ctx.ui.notify(
+        ports.length > 0
+          ? `Crossbar: probe ports set — ${ports.join(", ")}.`
+          : "Crossbar: probe ports reset to per-backend defaults.",
+        "info",
+      );
+    }
   }
 }
 
@@ -532,15 +835,61 @@ export interface OnboardingDeps {
   discover: () => Promise<DiscoveredServer[]>;
 }
 
+function selectServerOverlay(
+  ctx: ExtensionCommandContext,
+  items: SelectItem[],
+): Promise<string | null> {
+  return ctx.ui.custom<string | null>(
+    (_tui, theme, _kb, done) => {
+      const container = new Container();
+      container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
+      container.addChild(
+        new Text(theme.fg("accent", theme.bold("Crossbar — Local Model Servers"))),
+      );
+      container.addChild(
+        new Text(theme.fg("muted", "Select a server to manage, or add another.")),
+      );
+
+      const list = new SelectList(
+        items,
+        Math.min(items.length, 12),
+        getSelectListTheme(),
+      );
+      list.onSelect = (item) => done(item.value);
+      list.onCancel = () => done(null);
+
+      container.addChild(list);
+      container.addChild(
+        new Text(theme.fg("dim", "↑↓ navigate · Enter select · Esc close")),
+      );
+      container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
+
+      return {
+        render: (width: number) => container.render(width),
+        invalidate: () => container.invalidate(),
+        handleInput: (data: string) => {
+          if (matchesKey(data, "escape")) {
+            done(null);
+            return;
+          }
+          list.handleInput(data);
+          _tui.requestRender();
+        },
+      };
+    },
+    { overlay: true, overlayOptions: { width: "60%" } },
+  );
+}
+
 /**
  * Open the Crossbar onboarding overlay.
  *
  * Flow:
- *  1. Run discovery and show discovered servers + "Add manually" entry.
- *  2a. If user picks a discovered server → test connection (health + listModels).
- *  2b. If user picks "Add manually" → prompt for URL, optional API key, test.
- *  3. Pick a default model from the server's model list.
- *  4. Save to registry (+ auth.json for api keys).
+ *  1. Run discovery and show discovered + saved servers.
+ *  2. Saved server → persistent management menu; Back returns to server list.
+ *  3. New/manual server → resolve auth, fingerprint, and list chat models.
+ *  4. Optionally select a model to use in Pi now.
+ *  5. Save, register immediately, and select the chosen Pi model.
  *
  * The driver is intentionally thin: item building is delegated to the pure helpers
  * above, and connection testing goes through the same `createProbe` + adapter
@@ -557,203 +906,184 @@ export async function openOnboarding(
 ): Promise<void> {
   const { registry, discover } = deps;
 
-  // ── Step 0: run discovery (non-blocking for the overlay; we show a spinner) ──
-  ctx.ui.notify("Crossbar: scanning localhost for backends…", "info");
-
   let discovered: DiscoveredServer[] = [];
-  try {
-    discovered = await discover();
-  } catch {
-    // Discovery failures are non-fatal — the user can still add manually
-  }
-
-  const existing = registry.list();
-
-  // ── Step 1: show top-level discovery list ──────────────────────────────────
-  const topItems = buildDiscoveredItems(discovered, existing);
-
-  const chosenBaseUrl = await ctx.ui.custom<string | null>(
-    (_tui, theme, _kb, done) => {
-      const container = new Container();
-
-      container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
-      container.addChild(
-        new Text(theme.fg("accent", theme.bold("Crossbar — Local Model Servers"))),
-      );
-      container.addChild(
-        new Text(theme.fg("muted", "Select a discovered server or add one manually.")),
-      );
-
-      const list = new SelectList(
-        topItems,
-        Math.min(topItems.length, 12),
-        getSelectListTheme(),
-      );
-
-      list.onSelect = (item) => done(item.value);
-      list.onCancel = () => done(null);
-
-      container.addChild(list);
-      container.addChild(
-        new Text(theme.fg("dim", "↑↓ navigate · Enter select · Esc cancel")),
-      );
-      container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
-
-      return {
-        render: (width: number) => container.render(width),
-        invalidate: () => container.invalidate(),
-        handleInput: (data: string) => {
-          list.handleInput(data);
-          _tui.requestRender();
-        },
-      };
-    },
-    { overlay: true, overlayOptions: { width: "60%" } },
-  );
-
-  if (!chosenBaseUrl) return; // user cancelled
-
-  // ── Step 2: manual add branch ──────────────────────────────────────────────
-  let targetBaseUrl: string;
-  let manualApiKey: string | undefined;
-  let discoveredServer: DiscoveredServer | undefined;
-
-  if (chosenBaseUrl === "__manual__") {
-    // 2a. Ask for URL
-    const rawUrl = await ctx.ui.input("Server URL", "e.g. localhost:11434 or http://192.168.1.5:8080");
-    if (!rawUrl) return;
-
-    let normalizedUrl: string;
+  const rescan = async (): Promise<void> => {
+    ctx.ui.notify("Crossbar: scanning for backends…", "info");
     try {
-      normalizedUrl = normalizeManualUrl(rawUrl);
+      discovered = await discover();
     } catch {
-      ctx.ui.notify("Crossbar: invalid URL — could not parse.", "error");
-      return;
+      ctx.ui.notify("Crossbar: discovery failed; saved servers are still available.", "warning");
     }
+  };
+  await rescan();
 
-    // 2b. Ask for API key (with no-auth option)
-    const authChoice = await ctx.ui.select(
-      "Authentication",
-      ["No authentication (open server)", "Enter API key"],
+  while (true) {
+    const chosenBaseUrl = await selectServerOverlay(
+      ctx,
+      buildDiscoveredItems(discovered, registry.list()),
     );
-    if (authChoice === undefined) return;
 
-    if (authChoice === "Enter API key") {
-      const key = await ctx.ui.input("API key", "Paste your key (hidden after this dialog)");
-      if (key === undefined) return;
-      // key may be empty string if user submitted blank — treat as no-auth
-      manualApiKey = key.length > 0 ? key : undefined;
+    if (!chosenBaseUrl) return; // Esc at the server list closes Crossbar
+    if (chosenBaseUrl === "__rescan__") {
+      await rescan();
+      continue;
+    }
+    if (chosenBaseUrl === "__settings__") {
+      await openSettings(ctx, registry);
+      continue;
     }
 
-    targetBaseUrl = normalizedUrl;
-  } else {
-    // Already-registered server (discovered or offline) → open the manage overlay
-    // instead of re-running the add flow.
-    const existingRecord = registry.list().find((r) => r.baseUrl === chosenBaseUrl);
-    if (existingRecord) {
-      await openServerActions(pi, ctx, deps, existingRecord);
-      return;
-    }
+    let targetBaseUrl: string;
+    let manualApiKey: string | undefined;
+    let selectedAuth: "none" | "apiKey" | undefined;
+    let discoveredServer: DiscoveredServer | undefined;
 
-    // New discovered server path
-    discoveredServer = discovered.find((s) => s.baseUrl === chosenBaseUrl);
-    targetBaseUrl = chosenBaseUrl;
-  }
+    if (chosenBaseUrl === "__manual__") {
+      const rawUrl = await ctx.ui.input(
+        "Server URL",
+        "e.g. localhost:11434 or http://192.168.1.5:8080",
+      );
+      if (!rawUrl) continue;
 
-  // ── Step 3: fingerprint (if we don't already have a DiscoveredServer) ─────
-  if (!discoveredServer) {
-    ctx.ui.notify("Crossbar: testing connection…", "info");
-
-    const cred =
-      manualApiKey !== undefined
-        ? { mode: "apiKey" as const, apiKey: manualApiKey }
-        : { mode: "none" as const };
-
-    const probe = createProbe(targetBaseUrl, { auth: cred, defaultTimeoutMs: 3000 });
-
-    // Try each non-cloud adapter in probe order; first match wins
-    const { DISCOVERY_ADAPTERS } = await import("../adapters/index.ts");
-    for (const adapter of DISCOVERY_ADAPTERS) {
       try {
-        const result = await adapter.fingerprint(targetBaseUrl, probe);
-        if (result) {
-          discoveredServer = result;
-          // Propagate auth mode from the user's input
-          if (manualApiKey !== undefined) {
-            discoveredServer = { ...result, auth: "apiKey" };
-          }
-          break;
-        }
+        targetBaseUrl = normalizeManualUrl(rawUrl);
       } catch {
-        // fingerprint failures are non-fatal
+        ctx.ui.notify("Crossbar: invalid URL — could not parse.", "error");
+        continue;
+      }
+
+      const authChoice = await ctx.ui.select(
+        "Authentication",
+        ["No authentication (open server)", "Enter API key"],
+      );
+      if (authChoice === undefined) continue;
+
+      selectedAuth = authChoice === "Enter API key" ? "apiKey" : "none";
+      if (selectedAuth === "apiKey") {
+        const key = await ctx.ui.input("API key", "Paste your key (hidden after this dialog)");
+        if (key === undefined) continue;
+        if (key.length === 0) {
+          ctx.ui.notify("Crossbar: API key cannot be empty.", "warning");
+          continue;
+        }
+        manualApiKey = key;
+      }
+    } else {
+      const existingRecord = registry.list().find((r) => r.baseUrl === chosenBaseUrl);
+      if (existingRecord) {
+        await openServerActions(pi, ctx, deps, existingRecord);
+        continue;
+      }
+
+      discoveredServer = discovered.find((s) => s.baseUrl === chosenBaseUrl);
+      if (!discoveredServer) {
+        ctx.ui.notify("Crossbar: that server is no longer available.", "warning");
+        continue;
+      }
+      targetBaseUrl = chosenBaseUrl;
+
+      if (discoveredServer.auth === "apiKey") {
+        const key = await ctx.ui.input("API key", "Required by this server");
+        if (key === undefined) continue;
+        if (key.length === 0) {
+          ctx.ui.notify("Crossbar: API key cannot be empty.", "warning");
+          continue;
+        }
+        manualApiKey = key;
       }
     }
 
+    // Fingerprint manually entered servers.
     if (!discoveredServer) {
-      ctx.ui.notify(
-        "Crossbar: could not identify the server — check the URL and try again.",
-        "error",
-      );
-      return;
+      ctx.ui.notify("Crossbar: testing connection…", "info");
+      const cred = manualApiKey !== undefined
+        ? { mode: "apiKey" as const, apiKey: manualApiKey }
+        : { mode: "none" as const };
+      const probe = createProbe(targetBaseUrl, { auth: cred, defaultTimeoutMs: 3000 });
+
+      const { DISCOVERY_ADAPTERS } = await import("../adapters/index.ts");
+      for (const adapter of DISCOVERY_ADAPTERS) {
+        try {
+          const result = await adapter.fingerprint(targetBaseUrl, probe);
+          if (result) {
+            // The user's explicit auth choice is authoritative. Fingerprinting
+            // may use public metadata endpoints even on a keyed server.
+            discoveredServer = { ...result, auth: selectedAuth ?? result.auth };
+            break;
+          }
+        } catch {
+          // Try the next adapter.
+        }
+      }
+
+      if (!discoveredServer) {
+        ctx.ui.notify(
+          "Crossbar: could not identify the server — check the URL and try again.",
+          "error",
+        );
+        continue;
+      }
     }
-  }
 
-  // ── Step 4: list models ────────────────────────────────────────────────────
-  ctx.ui.notify(`Crossbar: connected to ${discoveredServer.label} — fetching models…`, "info");
+    ctx.ui.notify(
+      `Crossbar: connected to ${discoveredServer.label} — fetching models…`,
+      "info",
+    );
 
-  const adapter = adapterFor(discoveredServer.kind);
-  const cred =
-    manualApiKey !== undefined
+    const adapter = adapterFor(discoveredServer.kind);
+    const cred = manualApiKey !== undefined
       ? { mode: "apiKey" as const, apiKey: manualApiKey }
       : { mode: "none" as const };
+    const probe = createProbe(targetBaseUrl, { auth: cred, defaultTimeoutMs: 5000 });
 
-  const probe = createProbe(targetBaseUrl, { auth: cred, defaultTimeoutMs: 5000 });
+    let models: ModelDescriptor[] = [];
+    try {
+      models = await adapter.listModels(discoveredServer, cred, probe);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.ui.notify(`Crossbar: could not list models — ${msg}`, "error");
+      continue;
+    }
 
-  let models: ModelDescriptor[] = [];
-  try {
-    models = await adapter.listModels(discoveredServer, cred, probe);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    ctx.ui.notify(`Crossbar: could not list models — ${msg}`, "error");
-    return;
+    const selectableModels = chatModels(models);
+    if (selectableModels.length === 0) {
+      ctx.ui.notify("Crossbar: server returned no chat models.", "warning");
+      continue;
+    }
+
+    const chosenModelId = await selectOverlay(
+      ctx,
+      `Select model to use in Pi — ${discoveredServer.label}`,
+      buildModelItems(selectableModels),
+      "↑↓ navigate · Enter select · Esc skip",
+    );
+
+    const id = serverId(discoveredServer.kind, targetBaseUrl);
+    const record: ServerRecord = {
+      id,
+      kind: discoveredServer.kind,
+      baseUrl: targetBaseUrl,
+      label: discoveredServer.label,
+      auth: discoveredServer.auth,
+      enabled: true,
+      addedAt: Date.now(),
+      lastKnownModels: models,
+    };
+
+    // The key goes to Pi's authStorage, never crossbar.json.
+    await registry.add(record, manualApiKey);
+    await registerServer(pi, registry, record, models);
+
+    let modelNote = "";
+    if (chosenModelId !== null) {
+      const selected = await selectPiModel(pi, ctx, record, chosenModelId);
+      modelNote = selected
+        ? ` Using ${chosenModelId} in Pi.`
+        : ` Select ${chosenModelId} from /model.`;
+    }
+    ctx.ui.notify(
+      `Crossbar: ${discoveredServer.label} added and registered (${selectableModels.length} models).${modelNote}`,
+      "info",
+    );
   }
-
-  if (models.length === 0) {
-    ctx.ui.notify("Crossbar: server is reachable but returned no models.", "warning");
-    return;
-  }
-
-  // ── Step 5: pick default model ─────────────────────────────────────────────
-  const chosenModelId = await selectOverlay(
-    ctx,
-    `Pick default model — ${discoveredServer.label}`,
-    buildModelItems(models),
-    "↑↓ navigate · Enter select · Esc skip",
-  );
-
-  // chosenModelId === null means the user skipped — still register the server
-
-  // ── Step 6: save to registry ───────────────────────────────────────────────
-  const id = serverId(discoveredServer.kind, targetBaseUrl);
-  const record: ServerRecord = {
-    id,
-    kind: discoveredServer.kind,
-    baseUrl: targetBaseUrl,
-    label: discoveredServer.label,
-    auth: discoveredServer.auth,
-    enabled: true,
-    addedAt: Date.now(),
-    ...(chosenModelId !== null ? { lastKnownModels: models } : {}),
-  };
-
-  // Pass the api key separately so it goes through the registry → authStorage path
-  // (never written into crossbar.json)
-  await registry.add(record, manualApiKey);
-
-  const modelNote =
-    chosenModelId !== null ? ` Default model: ${chosenModelId}.` : "";
-  ctx.ui.notify(
-    `Crossbar: ${discoveredServer.label} added!${modelNote} It will appear in /model.`,
-    "info",
-  );
 }

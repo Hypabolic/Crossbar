@@ -256,3 +256,124 @@ describe("updateHealthCache", () => {
     ).not.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// setLastKnownModels
+// ---------------------------------------------------------------------------
+
+describe("setLastKnownModels", () => {
+  let store: FakeCredentialStore;
+  let registry: ServerRegistry;
+
+  beforeEach(() => {
+    store = new FakeCredentialStore();
+    registry = makeRegistry(store);
+  });
+
+  it("updates lastKnownModels and calls persist (flush)", async () => {
+    await registry.add(ollamaRecord);
+    const beforePersistCount = persisted.length;
+
+    const models = [{ id: "llama3", name: "Llama 3", input: ["text"] as ("text" | "image")[] }];
+    await registry.setLastKnownModels(ollamaRecord.id, models);
+
+    expect(registry.get(ollamaRecord.id)?.lastKnownModels).toEqual(models);
+    // Must have triggered exactly one additional persist
+    expect(persisted.length).toBe(beforePersistCount + 1);
+  });
+
+  it("persisted config contains the updated models (round-trip)", async () => {
+    await registry.add(ollamaRecord);
+    const models = [
+      { id: "llama3:70b", name: "Llama 3 70B", input: ["text"] as ("text" | "image")[], contextWindow: 131072, maxTokens: 4096 },
+    ];
+
+    await registry.setLastKnownModels(ollamaRecord.id, models);
+
+    const last = persisted[persisted.length - 1];
+    const savedRecord = last?.servers.find((s) => s.id === ollamaRecord.id);
+    expect(savedRecord?.lastKnownModels).toEqual(models);
+    expect(savedRecord?.lastKnownModels?.[0]?.id).toBe("llama3:70b");
+    expect(savedRecord?.lastKnownModels?.[0]?.contextWindow).toBe(131072);
+  });
+
+  it("is a no-op (no throw, no persist) for an unknown id", async () => {
+    const beforePersistCount = persisted.length;
+
+    await expect(registry.setLastKnownModels("no-such-id", [])).resolves.toBeUndefined();
+    expect(persisted.length).toBe(beforePersistCount);
+  });
+
+  it("does not affect other fields on the record", async () => {
+    await registry.add({ ...ollamaRecord, label: "My Ollama", enabled: false });
+    const models = [{ id: "m1", name: "M1", input: ["text"] as ("text" | "image")[] }];
+
+    await registry.setLastKnownModels(ollamaRecord.id, models);
+
+    const rec = registry.get(ollamaRecord.id);
+    expect(rec?.label).toBe("My Ollama");
+    expect(rec?.enabled).toBe(false);
+    expect(rec?.lastKnownModels).toEqual(models);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Discovery settings — round-trip + must survive server mutations
+// ---------------------------------------------------------------------------
+
+describe("discovery settings", () => {
+  let store: FakeCredentialStore;
+  let registry: ServerRegistry;
+
+  beforeEach(() => {
+    store = new FakeCredentialStore();
+    registry = makeRegistry(store);
+  });
+
+  it("exposes settings loaded from config", () => {
+    registry.load({
+      version: 1,
+      servers: [],
+      settings: { lanDiscovery: true, lanHosts: ["192.168.1.50"], probePorts: [11434] },
+    });
+    expect(registry.getSettings()).toEqual({
+      lanDiscovery: true,
+      lanHosts: ["192.168.1.50"],
+      probePorts: [11434],
+    });
+  });
+
+  it("setSettings persists and is reflected by getSettings", async () => {
+    await registry.setSettings({ lanDiscovery: true, probePorts: [8080] });
+    expect(registry.getSettings()).toEqual({ lanDiscovery: true, probePorts: [8080] });
+    const last = persisted.at(-1);
+    expect(last?.settings).toEqual({ lanDiscovery: true, probePorts: [8080] });
+  });
+
+  it("normalises an empty settings object to undefined (no settings block persisted)", async () => {
+    await registry.setSettings({});
+    expect(registry.getSettings()).toBeUndefined();
+    expect(persisted.at(-1)?.settings).toBeUndefined();
+  });
+
+  it("preserves settings across a server mutation (regression: clobbering bug)", async () => {
+    registry.load({
+      version: 1,
+      servers: [],
+      settings: { lanDiscovery: true, lanHosts: ["nas.local"] },
+    });
+
+    // A server add must NOT drop the previously-loaded settings from disk.
+    await registry.add(ollamaRecord);
+
+    const last = persisted.at(-1);
+    expect(last?.servers.map((s) => s.id)).toContain(ollamaRecord.id);
+    expect(last?.settings).toEqual({ lanDiscovery: true, lanHosts: ["nas.local"] });
+  });
+
+  it("a server toggle also preserves settings", async () => {
+    registry.load({ version: 1, servers: [ollamaRecord], settings: { probePorts: [1234] } });
+    await registry.setEnabled(ollamaRecord.id, false);
+    expect(persisted.at(-1)?.settings).toEqual({ probePorts: [1234] });
+  });
+});

@@ -1,9 +1,9 @@
 /**
  * Unit tests for the health-poll orchestration (src/poll.ts).
  *
- * `modelsChanged` is pure. `pollServer` is exercised against fake adapters (via a
- * module mock of adapters/index.ts), a spied `reRegisterServer`, and a fake
- * registry — no network, no real Pi.
+ * `modelsChanged` and `catalogueChanged` are pure. `pollServer` is exercised
+ * against fake adapters (via a module mock of adapters/index.ts), a spied
+ * `reRegisterServer`, and a fake registry — no network, no real Pi.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -44,12 +44,12 @@ vi.mock("../src/discovery/probe.ts", () => ({
 const __adapterMap = new Map<BackendKind, BackendAdapter>();
 
 // Imported after the mocks above are registered.
-const { modelsChanged, pollServer } = await import("../src/poll.ts");
+const { modelsChanged, catalogueChanged, pollServer } = await import("../src/poll.ts");
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function model(id: string): ModelDescriptor {
-  return { id, name: id, input: ["text"] };
+function model(id: string, overrides: Partial<ModelDescriptor> = {}): ModelDescriptor {
+  return { id, name: id, input: ["text"], ...overrides };
 }
 
 interface FakeAdapterOpts {
@@ -95,6 +95,7 @@ function record(over: Partial<ServerRecord> = {}): ServerRecord {
 function fakeRegistry(rec: ServerRecord) {
   const healthSet: HealthState[] = [];
   const cachePatches: unknown[] = [];
+  const setLastKnownModelsSpy = vi.fn(async (_id: string, _models: ModelDescriptor[]) => {});
   const registry = {
     list: () => [rec],
     async resolveCredential(): Promise<ServerCredential> {
@@ -107,8 +108,9 @@ function fakeRegistry(rec: ServerRecord) {
       healthSet.push(state);
     },
     getHealth: () => undefined,
+    setLastKnownModels: setLastKnownModelsSpy,
   } as unknown as ServerRegistry;
-  return { registry, healthSet, cachePatches };
+  return { registry, healthSet, cachePatches, setLastKnownModelsSpy };
 }
 
 const pi = {} as ExtensionAPI;
@@ -138,20 +140,128 @@ describe("modelsChanged", () => {
   });
 });
 
+// ── catalogueChanged ────────────────────────────────────────────────────────
+
+describe("catalogueChanged", () => {
+  it("is false for identical model lists", () => {
+    const m = model("a", { name: "A", contextWindow: 4096, maxTokens: 2048, reasoning: true, tools: true });
+    expect(catalogueChanged([m], [{ ...m }])).toBe(false);
+  });
+
+  it("is true when the id set changes (model added)", () => {
+    expect(catalogueChanged([model("a")], [model("a"), model("b")])).toBe(true);
+  });
+
+  it("is true when the id set changes (model removed)", () => {
+    expect(catalogueChanged([model("a"), model("b")], [model("a")])).toBe(true);
+  });
+
+  it("is false when model order changes but content is identical", () => {
+    const a = model("a");
+    const b = model("b");
+    expect(catalogueChanged([a, b], [b, a])).toBe(false);
+  });
+
+  it("is true when contextWindow changes for an existing model", () => {
+    const prev = [model("a", { contextWindow: 4096 })];
+    const next = [model("a", { contextWindow: 8192 })];
+    expect(catalogueChanged(prev, next)).toBe(true);
+  });
+
+  it("is true when maxTokens changes for an existing model", () => {
+    const prev = [model("a", { maxTokens: 1024 })];
+    const next = [model("a", { maxTokens: 2048 })];
+    expect(catalogueChanged(prev, next)).toBe(true);
+  });
+
+  it("is true when name changes for an existing model", () => {
+    const prev = [model("a", { name: "Old Name" })];
+    const next = [model("a", { name: "New Name" })];
+    expect(catalogueChanged(prev, next)).toBe(true);
+  });
+
+  it("is true when input modalities change", () => {
+    const prev = [model("a", { input: ["text"] })];
+    const next = [model("a", { input: ["text", "image"] })];
+    expect(catalogueChanged(prev, next)).toBe(true);
+  });
+
+  it("is false when input modalities are reordered but identical as a set", () => {
+    const prev = [model("a", { input: ["text", "image"] })];
+    const next = [model("a", { input: ["image", "text"] })];
+    expect(catalogueChanged(prev, next)).toBe(false);
+  });
+
+  it("is true when reasoning flag changes", () => {
+    const prev = [model("a", { reasoning: false })];
+    const next = [model("a", { reasoning: true })];
+    expect(catalogueChanged(prev, next)).toBe(true);
+  });
+
+  it("is true when tools flag changes", () => {
+    const prev = [model("a", { tools: false })];
+    const next = [model("a", { tools: true })];
+    expect(catalogueChanged(prev, next)).toBe(true);
+  });
+
+  it("is true when embeddings flag changes", () => {
+    const prev = [model("a", { embeddings: false })];
+    const next = [model("a", { embeddings: true })];
+    expect(catalogueChanged(prev, next)).toBe(true);
+  });
+
+  it("is true when prev is undefined and next is non-empty", () => {
+    expect(catalogueChanged(undefined, [model("a")])).toBe(true);
+  });
+
+  it("is false when prev is undefined and next is empty", () => {
+    expect(catalogueChanged(undefined, [])).toBe(false);
+  });
+});
+
 // ── pollServer ────────────────────────────────────────────────────────────────
 
 describe("pollServer", () => {
   it("records the health state and refreshes models without re-registering when unchanged", async () => {
     __adapterMap.set("ollama", fakeAdapter("ollama", { health: "healthy", models: [model("a")] }));
     const rec = record({ lastKnownModels: [model("a")] });
-    const { registry, healthSet, cachePatches } = fakeRegistry(rec);
+    const { registry, healthSet, setLastKnownModelsSpy } = fakeRegistry(rec);
 
     const state = await pollServer(pi, registry, rec);
 
     expect(state).toBe("healthy");
     expect(healthSet).toEqual(["healthy"]);
     expect(reRegisterSpy).not.toHaveBeenCalled();
-    expect(cachePatches.some((p) => Array.isArray((p as { models?: unknown }).models))).toBe(true);
+    expect(setLastKnownModelsSpy).not.toHaveBeenCalled();
+  });
+
+  it("persists the catalogue THEN re-registers when the model set changed", async () => {
+    __adapterMap.set("ollama", fakeAdapter("ollama", { models: [model("a"), model("b")] }));
+    const rec = record({ lastKnownModels: [model("a")] });
+    const { registry, setLastKnownModelsSpy } = fakeRegistry(rec);
+
+    // Track call order
+    const callOrder: string[] = [];
+    setLastKnownModelsSpy.mockImplementation(async () => { callOrder.push("setLastKnownModels"); });
+    reRegisterSpy.mockImplementation(async () => { callOrder.push("reRegister"); });
+
+    await pollServer(pi, registry, rec);
+
+    expect(setLastKnownModelsSpy).toHaveBeenCalledTimes(1);
+    expect(reRegisterSpy).toHaveBeenCalledTimes(1);
+    // Persist must happen before re-register
+    expect(callOrder).toEqual(["setLastKnownModels", "reRegister"]);
+  });
+
+  it("does NOT call setLastKnownModels when catalogue is unchanged", async () => {
+    __adapterMap.set("ollama", fakeAdapter("ollama", { models: [model("a")] }));
+    const rec = record({ lastKnownModels: [model("a")] });
+    const { registry, setLastKnownModelsSpy } = fakeRegistry(rec);
+
+    await pollServer(pi, registry, rec);
+
+    expect(setLastKnownModelsSpy).not.toHaveBeenCalled();
+    expect(reRegisterSpy).not.toHaveBeenCalled();
   });
 
   it("re-registers when the model set changed", async () => {
@@ -197,5 +307,29 @@ describe("pollServer", () => {
 
     expect(await pollServer(pi, registry, rec)).toBe("unreachable");
     expect(reRegisterSpy).not.toHaveBeenCalled();
+  });
+
+  it("updates lastSeenAt ephemerally regardless of catalogue change", async () => {
+    __adapterMap.set("ollama", fakeAdapter("ollama", { models: [model("a")] }));
+    const rec = record({ lastKnownModels: [model("a")] });
+    const { registry, cachePatches } = fakeRegistry(rec);
+
+    await pollServer(pi, registry, rec);
+
+    // At least one cache patch with a lastSeenAt timestamp
+    expect(
+      cachePatches.some((p) => typeof (p as { lastSeenAt?: unknown }).lastSeenAt === "number"),
+    ).toBe(true);
+  });
+
+  it("calls setLastKnownModels with the new models when catalogue changed", async () => {
+    const newModels = [model("a"), model("b")];
+    __adapterMap.set("ollama", fakeAdapter("ollama", { models: newModels }));
+    const rec = record({ lastKnownModels: [model("a")] });
+    const { registry, setLastKnownModelsSpy } = fakeRegistry(rec);
+
+    await pollServer(pi, registry, rec);
+
+    expect(setLastKnownModelsSpy).toHaveBeenCalledWith(rec.id, newModels);
   });
 });

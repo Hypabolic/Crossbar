@@ -191,6 +191,17 @@ export interface DiscoverLanOptions {
   timeoutMs?: number;
   /** Ports to probe on each host (defaults to DEFAULT_PROBE_PORTS). */
   ports?: number[];
+  /**
+   * Max parallel origins. With {@link livenessFirst} a dead origin costs one socket,
+   * so a subnet sweep can run this far higher than the localhost default of 8.
+   */
+  concurrency?: number;
+  /**
+   * Probe each origin with one cheap request first and skip the full adapter
+   * fingerprint chain when nothing is listening. Keeps socket use ≈ concurrency
+   * during a wide sweep (most addresses are dead), so concurrency can be raised safely.
+   */
+  livenessFirst?: boolean;
   /** Abort signal to cancel a sweep in progress. */
   signal?: AbortSignal;
   /** Override how the per-origin Probe is built (tests inject a fake probe here). */
@@ -213,6 +224,8 @@ export async function discoverLan(
 
   const ports = opts?.ports ?? DEFAULT_PROBE_PORTS;
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const concurrency = opts?.concurrency ?? DEFAULT_CONCURRENCY;
+  const livenessFirst = opts?.livenessFirst ?? false;
   const signal = opts?.signal;
 
   const localAdapters = adapters.filter((a) => !CLOUD_KINDS.has(a.kind));
@@ -228,10 +241,25 @@ export async function discoverLan(
 
   const tasks = origins.map((origin) => async (): Promise<DiscoveredServer | null> => {
     if (signal?.aborted) return null;
+    // Liveness gate: for a wide subnet sweep, most addresses are dead. A single
+    // cheap request first means a dead origin costs ONE socket (not one per
+    // adapter), so concurrency can be raised without exhausting file descriptors.
+    if (livenessFirst) {
+      const probe = opts?.probeFactory
+        ? opts.probeFactory(origin, timeoutMs)
+        : createProbe(origin, { defaultTimeoutMs: timeoutMs });
+      let alive = false;
+      try {
+        alive = (await probe("/")).status !== 0; // status 0 = no TCP connection
+      } catch {
+        alive = false;
+      }
+      if (!alive) return null;
+    }
     return probeOrigin(origin, localAdapters, timeoutMs, opts?.probeFactory);
   });
 
-  const allMatches = await runBounded(tasks, DEFAULT_CONCURRENCY);
+  const allMatches = await runBounded(tasks, concurrency);
 
   const seen = new Set<string>();
   const deduplicated: DiscoveredServer[] = [];

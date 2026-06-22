@@ -44,6 +44,43 @@ export function modelsChanged(
 }
 
 /**
+ * True when two model lists differ in a way that is registration-relevant.
+ *
+ * Returns true when:
+ *   - the id SET differs (delegates to modelsChanged), OR
+ *   - for any id present in both: name, contextWindow, maxTokens, input
+ *     (as a sorted set), reasoning, tools, or embeddings changed.
+ *
+ * Order of models in the list does not matter — only content changes do.
+ * The existing `modelsChanged` export is kept intact with id-only semantics.
+ */
+export function catalogueChanged(
+  prev: ModelDescriptor[] | undefined,
+  next: ModelDescriptor[],
+): boolean {
+  // Fast path: if the id set changed, we're done.
+  if (modelsChanged(prev, next)) return true;
+
+  // Same id set — check registration-relevant metadata for each shared id.
+  const prevMap = new Map((prev ?? []).map((m) => [m.id, m]));
+  for (const n of next) {
+    const p = prevMap.get(n.id);
+    if (!p) continue; // shouldn't happen after modelsChanged check, but be safe
+    if (p.name !== n.name) return true;
+    if (p.contextWindow !== n.contextWindow) return true;
+    if (p.maxTokens !== n.maxTokens) return true;
+    // Compare input modalities as sorted sets.
+    const pi = [...p.input].sort().join(",");
+    const ni = [...n.input].sort().join(",");
+    if (pi !== ni) return true;
+    if (p.reasoning !== n.reasoning) return true;
+    if (p.tools !== n.tools) return true;
+    if (p.embeddings !== n.embeddings) return true;
+  }
+  return false;
+}
+
+/**
  * Poll a single server: refresh health + models, re-register on change, and write
  * the results to the registry cache. Returns the observed health state. The health
  * and model probes are caught and reported as `unreachable`; `pollAll` additionally
@@ -70,14 +107,16 @@ export async function pollServer(
     }
   }
 
-  // 2) Refresh the model list; re-register only when the set changed. For backends
-  //    without a health endpoint, listModels success/failure infers reachability.
+  // 2) Refresh the model list; persist + re-register only when the catalogue
+  //    changed in a registration-relevant way. For backends without a health
+  //    endpoint, listModels success/failure infers reachability.
   try {
     const models = await adapter.listModels(server, cred, probe);
-    if (modelsChanged(record.lastKnownModels, models)) {
+    if (catalogueChanged(record.lastKnownModels, models)) {
+      await registry.setLastKnownModels(record.id, models);
       await reRegisterServer(pi, registry, record, models);
     }
-    registry.updateHealthCache(record.id, { models, lastSeenAt: Date.now() });
+    registry.updateHealthCache(record.id, { lastSeenAt: Date.now() });
     if (!hasHealth) health = "healthy";
   } catch {
     if (!hasHealth) health = "unreachable";

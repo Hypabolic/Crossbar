@@ -23,8 +23,11 @@ import {
   buildDiscoveredItems,
   buildManageItems,
   buildModelItems,
+  buildSettingsItems,
   capabilityActions,
   normalizeManualUrl,
+  parseHosts,
+  parsePorts,
 } from "../../src/ui/onboarding.ts";
 
 import type { DiscoveredServer, ModelDescriptor, ServerRecord } from "../../src/core/types.ts";
@@ -81,22 +84,24 @@ function makeModel(overrides: Partial<ModelDescriptor> = {}): ModelDescriptor {
 // ─── buildDiscoveredItems ────────────────────────────────────────────────────
 
 describe("buildDiscoveredItems", () => {
-  it("always appends a '+ Add manually' sentinel at the end", () => {
+  it("always appends rescan, settings, and '+ Add manually' actions", () => {
     const items = buildDiscoveredItems([], []);
-    expect(items).toHaveLength(1);
-    expect(items[0]!.value).toBe("__manual__");
-    expect(items[0]!.label).toContain("Add");
+    expect(items).toHaveLength(3);
+    expect(items[0]!.value).toBe("__rescan__");
+    expect(items[1]!.value).toBe("__settings__");
+    expect(items[2]!.value).toBe("__manual__");
+    expect(items[2]!.label).toContain("Add");
   });
 
-  it("emits one item per discovered server plus the manual sentinel", () => {
+  it("emits one item per discovered server plus the utility actions", () => {
     const discovered = [
       makeDiscovered({ baseUrl: "http://127.0.0.1:11434", kind: "ollama" }),
       makeDiscovered({ baseUrl: "http://127.0.0.1:1234", kind: "lmstudio" }),
     ];
     const items = buildDiscoveredItems(discovered, []);
-    // 2 servers + 1 manual sentinel
-    expect(items).toHaveLength(3);
-    expect(items[2]!.value).toBe("__manual__");
+    // 2 servers + rescan + settings + manual
+    expect(items).toHaveLength(5);
+    expect(items[4]!.value).toBe("__manual__");
   });
 
   it("uses the server baseUrl as the item value", () => {
@@ -139,11 +144,10 @@ describe("buildDiscoveredItems", () => {
     expect(items[0]!.label).toContain("192.168.1.10:8443");
   });
 
-  it("capitalises the kind in the label", () => {
+  it("uses the backend's human-readable display name", () => {
     const discovered = [makeDiscovered({ kind: "lmstudio" })];
     const items = buildDiscoveredItems(discovered, []);
-    // Label starts with the capitalized kind
-    expect(items[0]!.label).toMatch(/^Lmstudio/);
+    expect(items[0]!.label).toMatch(/^LM Studio/);
   });
 
   it("appends registered servers that were not discovered this scan", () => {
@@ -156,25 +160,27 @@ describe("buildDiscoveredItems", () => {
       label: "LM Studio (127.0.0.1:1234)",
     });
     const items = buildDiscoveredItems([], [offline]);
-    // offline-registered entry + manual sentinel
-    expect(items).toHaveLength(2);
+    // offline-registered entry + utility actions
+    expect(items).toHaveLength(4);
     expect(items[0]!.value).toBe("http://127.0.0.1:1234");
     expect(items[0]!.label).toContain("(added)");
     expect(items[0]!.description).toContain("not currently discovered");
-    expect(items[1]!.value).toBe("__manual__");
+    expect(items[1]!.value).toBe("__rescan__");
+    expect(items[2]!.value).toBe("__settings__");
+    expect(items[3]!.value).toBe("__manual__");
   });
 
   it("does not duplicate a registered server that is also discovered", () => {
     const discovered = [makeDiscovered()];
     const existing = [makeRecord()]; // same id as the discovered server
     const items = buildDiscoveredItems(discovered, existing);
-    // 1 discovered (marked added) + manual sentinel — NOT an extra offline row
-    expect(items).toHaveLength(2);
+    // 1 discovered + utility actions — NOT an extra offline row
+    expect(items).toHaveLength(4);
     expect(items[0]!.label).toContain("(added)");
-    expect(items[1]!.value).toBe("__manual__");
+    expect(items[3]!.value).toBe("__manual__");
   });
 
-  it("skips disabled registered servers in the offline-append pass", () => {
+  it("keeps disabled registered servers visible so they can be re-enabled", () => {
     const disabled = makeRecord({
       id: "crossbar-vllm-127-0-0-1-8000",
       kind: "vllm",
@@ -182,38 +188,104 @@ describe("buildDiscoveredItems", () => {
       enabled: false,
     });
     const items = buildDiscoveredItems([], [disabled]);
-    // Only the manual sentinel — the disabled server is not appended.
-    expect(items).toHaveLength(1);
-    expect(items[0]!.value).toBe("__manual__");
+    expect(items).toHaveLength(4);
+    expect(items[0]!.value).toBe(disabled.baseUrl);
+    expect(items[0]!.label).toContain("(disabled)");
+    expect(items[0]!.description).toContain("select to manage");
+    expect(items[3]!.value).toBe("__manual__");
+  });
+
+  it("marks a reachable disabled server as disabled rather than added", () => {
+    const disabled = makeRecord({ enabled: false });
+    const items = buildDiscoveredItems([makeDiscovered()], [disabled]);
+    expect(items[0]!.label).toContain("(disabled)");
+    expect(items[0]!.description).toContain("server is reachable");
+  });
+});
+
+// ─── Discovery settings helpers ───────────────────────────────────────────────
+
+describe("parsePorts", () => {
+  it("parses a comma/space-separated list into sorted unique ports", () => {
+    expect(parsePorts("11434, 8080  1234")).toEqual([1234, 8080, 11434]);
+  });
+  it("drops out-of-range and non-numeric tokens", () => {
+    expect(parsePorts("80, 0, 70000, abc, 443")).toEqual([80, 443]);
+  });
+  it("de-duplicates", () => {
+    expect(parsePorts("8080, 8080, 8080")).toEqual([8080]);
+  });
+  it("returns an empty array for blank input (use defaults)", () => {
+    expect(parsePorts("   ")).toEqual([]);
+    expect(parsePorts("")).toEqual([]);
+  });
+});
+
+describe("parseHosts", () => {
+  it("splits, trims, and de-duplicates hosts", () => {
+    expect(parseHosts(" 192.168.1.50 , nas.local,192.168.1.50 ")).toEqual([
+      "192.168.1.50",
+      "nas.local",
+    ]);
+  });
+  it("returns an empty array for blank input", () => {
+    expect(parseHosts("  ")).toEqual([]);
+  });
+});
+
+describe("buildSettingsItems", () => {
+  it("reflects defaults when no settings are configured", () => {
+    const items = buildSettingsItems({});
+    expect(items.map((i) => i.value)).toEqual(["toggle-lan", "edit-hosts", "edit-ports", "back"]);
+    expect(items[0]!.label).toContain("OFF");
+    expect(items[1]!.label).toContain("auto"); // blank hosts = auto-scan local subnet
+    expect(items[2]!.label).toContain("defaults");
+  });
+  it("shows ON and the configured hosts/ports when set", () => {
+    const items = buildSettingsItems({
+      lanDiscovery: true,
+      lanHosts: ["192.168.1.50"],
+      probePorts: [11434, 8080],
+    });
+    expect(items[0]!.label).toContain("ON");
+    expect(items[1]!.label).toContain("192.168.1.50");
+    expect(items[2]!.label).toContain("11434");
+    expect(items[2]!.label).toContain("8080");
   });
 });
 
 // ─── buildManageItems ─────────────────────────────────────────────────────────
 
 describe("buildManageItems", () => {
-  it("offers every capability action plus Disable + Remove for an enabled full-capability backend", () => {
+  it("offers every capability action plus Disable, Remove, and Back", () => {
     const values = buildManageItems(ollamaAdapter, true).map((i) => i.value);
     expect(values).toEqual(
-      expect.arrayContaining(["switch", "load", "unload", "introspect", "disable", "remove"]),
+      expect.arrayContaining(["switch", "load", "unload", "introspect", "disable", "remove", "back"]),
     );
   });
 
-  it("offers Disable/Remove (only) for an enabled capability-less backend", () => {
+  it("offers Disable/Remove/Back for an enabled capability-less backend", () => {
     for (const adapter of [vllmAdapter, openaiAdapter, anthropicAdapter, genericAdapter]) {
       const values = buildManageItems(adapter, true).map((i) => i.value);
-      expect(values).toEqual(["disable", "remove"]);
+      expect(values).toEqual(["disable", "remove", "back"]);
     }
   });
 
   it("shows Enable instead of Disable when the server is disabled", () => {
     const values = buildManageItems(vllmAdapter, false).map((i) => i.value);
-    expect(values).toEqual(["enable", "remove"]);
+    expect(values).toEqual(["enable", "remove", "back"]);
     expect(values).not.toContain("disable");
   });
 
-  it("puts Remove last in the list", () => {
+  it("hides operational actions while a capable server is disabled", () => {
+    const values = buildManageItems(ollamaAdapter, false).map((i) => i.value);
+    expect(values).toEqual(["enable", "remove", "back"]);
+  });
+
+  it("puts Back last and Remove immediately before it", () => {
     const items = buildManageItems(ollamaAdapter, true);
-    expect(items[items.length - 1]!.value).toBe("remove");
+    expect(items.at(-2)!.value).toBe("remove");
+    expect(items.at(-1)!.value).toBe("back");
   });
 
   it("gives every item a non-empty label and value", () => {

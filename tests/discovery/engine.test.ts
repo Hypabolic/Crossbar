@@ -10,6 +10,7 @@ import {
   discoverLocalhost,
   discoverLan,
   DEFAULT_PROBE_PORTS,
+  type ProbeFactory,
 } from "../../src/discovery/engine.ts";
 import type { BackendAdapter } from "../../src/core/backend-adapter.ts";
 import type {
@@ -327,6 +328,51 @@ describe("discoverLan", () => {
 
     await discoverLan([anthropicAdapter], ["192.168.1.1"], { ports: [443] });
     expect(called).toBe(false);
+  });
+
+  describe("livenessFirst gate", () => {
+    const liveOrigin = "http://192.168.1.5:11434";
+    const hosts = ["192.168.1.4", "192.168.1.5", "192.168.1.6"];
+
+    // Only `liveOrigin` answers the liveness probe; the rest are connection-refused.
+    const probeFactory: ProbeFactory = (origin) => async (): Promise<ProbeResult> =>
+      origin === liveOrigin
+        ? { status: 200, ok: true, headers: {} }
+        : { status: 0, ok: false, headers: {}, error: "refused" };
+
+    it("only fingerprints origins that pass the liveness probe", async () => {
+      const fingerprinted: string[] = [];
+      const adapter = makeAdapter("ollama", async (baseUrl) => {
+        fingerprinted.push(baseUrl);
+        return null;
+      });
+
+      await discoverLan([adapter], hosts, {
+        ports: [11434],
+        concurrency: 16,
+        livenessFirst: true,
+        probeFactory,
+      });
+
+      // Dead addresses are gated out before the adapter fan-out runs.
+      expect(fingerprinted).toEqual([liveOrigin]);
+    });
+
+    it("fingerprints every origin when the gate is off (default)", async () => {
+      const fingerprinted: string[] = [];
+      const adapter = makeAdapter("ollama", async (baseUrl) => {
+        fingerprinted.push(baseUrl);
+        return null;
+      });
+
+      await discoverLan([adapter], hosts, { ports: [11434], probeFactory });
+
+      expect(fingerprinted.sort()).toEqual([
+        "http://192.168.1.4:11434",
+        "http://192.168.1.5:11434",
+        "http://192.168.1.6:11434",
+      ]);
+    });
   });
 });
 
