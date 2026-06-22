@@ -32,6 +32,7 @@ import { registerServer, unregisterServer } from "../shim/provider-shim.ts";
 import { createProbe } from "../discovery/probe.ts";
 import { expandHosts, localSubnetCidrs } from "../discovery/subnet.ts";
 import { catalogueChanged } from "../poll.ts";
+import { DEFAULT_PROBE_PORTS } from "../discovery/engine.ts";
 
 // ─── Pure helpers ────────────────────────────────────────────────────────────
 
@@ -190,6 +191,24 @@ export function parseHosts(input: string): string[] {
 }
 
 /**
+ * Human description for a probe port in the managed list UI.
+ * Known defaults get friendly names; others are "custom".
+ */
+export function probePortDescription(port: number): string {
+  const map: Record<number, string> = {
+    11434: "Ollama",
+    1234: "LM Studio",
+    8080: "llama.cpp / llama-swap",
+    8000: "vLLM",
+    5000: "TabbyAPI / oobabooga",
+    5001: "KoboldCpp",
+    1337: "Jan",
+  };
+  const hint = map[port] ?? "custom";
+  return `${hint} · select to remove`;
+}
+
+/**
  * Drop default/empty fields so crossbar.json stays clean: LAN off and empty
  * host/port lists are simply absent.
  */
@@ -198,15 +217,25 @@ function cleanSettings(settings: CrossbarSettings): CrossbarSettings {
   if (settings.lanDiscovery) out.lanDiscovery = true;
   if (settings.lanHosts && settings.lanHosts.length > 0) out.lanHosts = settings.lanHosts;
   if (settings.probePorts && settings.probePorts.length > 0) out.probePorts = settings.probePorts;
+  // Persist only the non-default (false); auto-register defaults to on.
+  if (settings.autoRegisterLocalhost === false) out.autoRegisterLocalhost = false;
   return out;
 }
 
 /** Build the discovery-settings menu, reflecting the current values in each label. */
 export function buildSettingsItems(settings: CrossbarSettings): SelectItem[] {
   const lanOn = settings.lanDiscovery === true;
+  const autoReg = settings.autoRegisterLocalhost !== false; // default on
   const hosts = settings.lanHosts ?? [];
   const ports = settings.probePorts ?? [];
   return [
+    {
+      value: "toggle-autoreg",
+      label: `Auto-register localhost: ${autoReg ? "ON" : "OFF"}`,
+      description: autoReg
+        ? "New localhost servers are added automatically (LAN is always manual)"
+        : "Every server must be added by hand via /crossbar",
+    },
     {
       value: "toggle-lan",
       label: `LAN discovery: ${lanOn ? "ON" : "OFF"}`,
@@ -296,6 +325,7 @@ export function capabilityActions(
 
 /** One-line hints shown under each manage action. */
 const ACTION_DESCRIPTIONS: Record<string, string> = {
+  use: "Make one of its models the model Pi uses",
   switch: "Activate it on the server and select it in Pi",
   load: "Load a model into memory",
   unload: "Evict a loaded model from memory",
@@ -307,19 +337,23 @@ const ACTION_DESCRIPTIONS: Record<string, string> = {
 };
 
 /**
- * Build the manage-overlay action list for an already-registered server: the
- * adapter's capability-filtered actions (switch / load / unload / introspect),
- * an enable/disable toggle (driven by `enabled`), and a "Remove server" action.
- * Backends without any local capabilities (vLLM, OpenAI, Anthropic, generic) show
- * only the enable/disable toggle and "Remove server".
+ * Build the manage-overlay action list for an already-registered server. For an
+ * enabled server the first action is always "Use a model in Pi" (capability-
+ * independent — every registered server has models in Pi's picker), followed by the
+ * adapter's capability-filtered actions (switch / load / unload / introspect). All
+ * servers get an enable/disable toggle, "Remove server", and "Back".
  */
 export function buildManageItems(adapter: BackendAdapter, enabled: boolean): SelectItem[] {
-  const items: SelectItem[] = (enabled ? capabilityActions(adapter) : []).map((a) => {
-    const item: SelectItem = { value: a.value, label: a.label };
-    const desc = ACTION_DESCRIPTIONS[a.value];
-    if (desc !== undefined) item.description = desc;
-    return item;
-  });
+  const items: SelectItem[] = [];
+  if (enabled) {
+    items.push({ value: "use", label: "Use a model in Pi", description: ACTION_DESCRIPTIONS["use"]! });
+    for (const a of capabilityActions(adapter)) {
+      const item: SelectItem = { value: a.value, label: a.label };
+      const desc = ACTION_DESCRIPTIONS[a.value];
+      if (desc !== undefined) item.description = desc;
+      items.push(item);
+    }
+  }
   items.push(
     enabled
       ? { value: "disable", label: "Disable server", description: ACTION_DESCRIPTIONS["disable"]! }
@@ -498,6 +532,42 @@ async function fetchModels(
     ctx.ui.notify(`Crossbar: could not list models — ${errMsg(err)}`, "error");
     return null;
   }
+}
+
+/**
+ * Pick one of the server's registered models and make it the model Pi uses — a
+ * pure Pi-side selection (no server-side switch/load). Works for every backend,
+ * including those without SwitchModel/LoadUnload (vLLM, llama.cpp, generic, …).
+ */
+async function performUseModel(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  registry: ServerRegistry,
+  record: ServerRecord,
+): Promise<void> {
+  const models = await fetchModels(ctx, registry, record);
+  if (!models) return;
+  const selectableModels = chatModels(models);
+  if (selectableModels.length === 0) {
+    ctx.ui.notify("Crossbar: no chat models to use.", "warning");
+    return;
+  }
+
+  const modelId = await selectOverlay(
+    ctx,
+    `Use a model in Pi — ${record.label}`,
+    buildModelItems(selectableModels),
+    "↑↓ navigate · Enter select · Esc cancel",
+  );
+  if (!modelId) return;
+
+  const selected = await selectPiModel(pi, ctx, record, modelId);
+  ctx.ui.notify(
+    selected
+      ? `Crossbar: Pi is now using ${modelId}.`
+      : `Crossbar: could not select ${modelId} — pick it from /model.`,
+    selected ? "info" : "warning",
+  );
 }
 
 /** Switch the active model or load a model: pick from the list, then call the adapter. */
@@ -744,6 +814,9 @@ export async function openServerActions(
     if (!choice || choice === "back") return;
 
     switch (choice) {
+      case "use":
+        await performUseModel(pi, ctx, registry, current);
+        break;
       case "switch":
         await performModelAction(pi, ctx, registry, current, "switch");
         break;
@@ -791,7 +864,17 @@ async function openSettings(
     );
     if (!choice || choice === "back") return;
 
-    if (choice === "toggle-lan") {
+    if (choice === "toggle-autoreg") {
+      const enabledNow = current.autoRegisterLocalhost !== false;
+      const next = cleanSettings({ ...current, autoRegisterLocalhost: !enabledNow });
+      await registry.setSettings(next);
+      ctx.ui.notify(
+        next.autoRegisterLocalhost === false
+          ? "Crossbar: localhost auto-register off — add every server via /crossbar."
+          : "Crossbar: localhost servers will auto-register on startup.",
+        "info",
+      );
+    } else if (choice === "toggle-lan") {
       const next = cleanSettings({ ...current, lanDiscovery: !current.lanDiscovery });
       await registry.setSettings(next);
       if (!next.lanDiscovery) {
@@ -836,20 +919,100 @@ async function openSettings(
         }
       }
     } else if (choice === "edit-ports") {
+      await openProbePorts(ctx, registry);
+      // settings loop will re-read and re-render the (possibly updated) menu
+    }
+  }
+}
+
+// ─── Probe ports sub-overlay (Task B) ───────────────────────────────────────
+
+/**
+ * Managed list UI for probe ports: view effective list (override or defaults),
+ * remove individual ports, add new ones (union + dedupe + sort), or reset to defaults.
+ *
+ * Effective ports = settings.probePorts (if non-empty) else DEFAULT_PROBE_PORTS.
+ * Removing the last port clears the override (cleanSettings drops empty probePorts).
+ * Adding when using defaults materializes an explicit override list.
+ * Loops until Back/Esc; re-reads registry each pass.
+ */
+async function openProbePorts(ctx: ExtensionCommandContext, registry: ServerRegistry): Promise<void> {
+  while (true) {
+    const current = registry.getSettings() ?? {};
+    const isCustom = !!(current.probePorts && current.probePorts.length > 0);
+    const effective = isCustom ? current.probePorts! : [...DEFAULT_PROBE_PORTS];
+
+    const items: SelectItem[] = effective.map((p) => ({
+      value: `port:${p}`,
+      label: String(p),
+      description: probePortDescription(p),
+    }));
+
+    items.push({
+      value: "__add__",
+      label: "＋ Add a port…",
+      description: "Append one or more ports (1–65535)",
+    });
+
+    if (isCustom) {
+      items.push({
+        value: "__reset__",
+        label: "↺ Reset to defaults",
+        description: `Restores ${DEFAULT_PROBE_PORTS.join(", ")}`,
+      });
+    }
+
+    items.push({
+      value: "back",
+      label: "← Back",
+      description: "Return to discovery settings",
+    });
+
+    const choice = await selectOverlay(
+      ctx,
+      "Probe ports",
+      items,
+      "Enter a port to remove it · ＋ add · Esc back",
+    );
+    if (!choice || choice === "back") return;
+
+    if (choice === "__add__") {
       const raw = await ctx.ui.input(
-        "Probe ports",
-        "comma-separated, e.g. 11434, 8080, 1234 (blank = per-backend defaults)",
+        "Add probe port",
+        "a single port number, e.g. 4891 (1–65535)",
       );
-      if (raw === undefined) continue; // cancelled — leave unchanged
-      const ports = parsePorts(raw);
-      const next = cleanSettings({ ...current, probePorts: ports });
+      if (raw === undefined) continue; // cancelled
+      const parsed = parsePorts(raw);
+      if (parsed.length === 0) {
+        ctx.ui.notify("Crossbar: no valid port entered (1–65535).", "warning");
+        continue;
+      }
+      const merged = [...new Set([...effective, ...parsed])].sort((a, b) => a - b);
+      const next = cleanSettings({ ...current, probePorts: merged });
+      await registry.setSettings(next);
+      ctx.ui.notify(`Crossbar: probe ports set — ${merged.join(", ")}.`, "info");
+      continue;
+    }
+
+    if (choice === "__reset__") {
+      const next = cleanSettings({ ...current, probePorts: [] });
+      await registry.setSettings(next);
+      ctx.ui.notify("Crossbar: probe ports reset to per-backend defaults.", "info");
+      continue;
+    }
+
+    if (choice.startsWith("port:")) {
+      const n = Number(choice.slice(5));
+      const remaining = effective.filter((p) => p !== n);
+      const next = cleanSettings({ ...current, probePorts: remaining });
       await registry.setSettings(next);
       ctx.ui.notify(
-        ports.length > 0
-          ? `Crossbar: probe ports set — ${ports.join(", ")}.`
-          : "Crossbar: probe ports reset to per-backend defaults.",
+        remaining.length > 0
+          ? `Crossbar: removed ${n}; now probing ${remaining.join(", ")}.`
+          : "Crossbar: removed last override port — now using defaults.",
         "info",
       );
+      continue;
     }
   }
 }
@@ -859,6 +1022,12 @@ async function openSettings(
 export interface OnboardingDeps {
   registry: ServerRegistry;
   discover: () => Promise<DiscoveredServer[]>;
+  /**
+   * Seed the server list with results from a prior scan (startup localhost probe,
+   * or the last explicit Rescan). Opening /crossbar shows this immediately and
+   * does NOT trigger a fresh discovery; only the "⟳ Rescan" action runs discover().
+   */
+  initialDiscovered?: DiscoveredServer[];
 }
 
 function selectServerOverlay(
@@ -932,7 +1101,10 @@ export async function openOnboarding(
 ): Promise<void> {
   const { registry, discover } = deps;
 
-  let discovered: DiscoveredServer[] = [];
+  // Show the discovery results from startup (or the last rescan) immediately — opening
+  // /crossbar must NOT trigger a fresh scan. The "⟳ Rescan" action re-scans on demand
+  // (and that's where the LAN sweep happens).
+  let discovered: DiscoveredServer[] = deps.initialDiscovered ?? [];
   const rescan = async (): Promise<void> => {
     ctx.ui.notify("Crossbar: scanning for backends…", "info");
     try {
@@ -941,7 +1113,6 @@ export async function openOnboarding(
       ctx.ui.notify("Crossbar: discovery failed; saved servers are still available.", "warning");
     }
   };
-  await rescan();
 
   while (true) {
     const chosenBaseUrl = await selectServerOverlay(

@@ -33,6 +33,9 @@ import { installLoadedWidget, type LoadedWidgetHandle } from "./ui/loaded-widget
 
 const HEALTH_POLL_MS = 15_000;
 
+/** Status-bar key for the transient "scanning…" indicator shown during startup discovery. */
+const SCAN_STATUS_KEY = "crossbar-scan";
+
 /** Minimal DiscoveredServer reconstructed from a persisted record for adapter calls. */
 function recordToServer(record: ServerRecord): DiscoveredServer {
   return {
@@ -52,18 +55,26 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
   let widget: LoadedWidgetHandle | undefined;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
 
+  /** Cache of the most recent discovery (populated at startup with localhost-only;
+   *  refreshed on every /crossbar Rescan which does the full sweep when LAN on).
+   *  Passed as initialDiscovered so opening /crossbar does not re-scan. */
+  let lastDiscovered: DiscoveredServer[] = [];
+
   // Discovery honours CrossbarSettings: custom probe ports always, plus opt-in LAN
   // probing. When LAN discovery is on and no explicit hosts are given, sweep the
   // machine's own private subnet(s); explicit hosts/CIDRs override that. Reads
   // settings from the registry at call time so settings-overlay edits apply next scan.
-  const discover = async (): Promise<DiscoveredServer[]> => {
+  //
+  // `includeLan` defaults true (the /crossbar path). Startup passes false so the slow
+  // LAN sweep never blocks first paint — LAN servers are surfaced in /crossbar instead.
+  const discover = async (opts?: { includeLan?: boolean }): Promise<DiscoveredServer[]> => {
     const adapters = [...DISCOVERY_ADAPTERS];
     const settings = registry?.getSettings();
     const ports =
       settings?.probePorts && settings.probePorts.length > 0 ? settings.probePorts : undefined;
 
     const local = await discoverLocalhost(adapters, ports ? { ports } : undefined);
-    if (!settings?.lanDiscovery) {
+    if (opts?.includeLan === false || !settings?.lanDiscovery) {
       return local;
     }
 
@@ -126,46 +137,61 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
     reg.load(cfg); // registry now owns discovery settings (cfg.settings)
     registry = reg;
 
-    // 1) Register every enabled server from the saved config.
-    for (const record of reg.list()) {
-      if (!record.enabled) continue;
-      try {
-        await refreshAndRegister(reg, record);
-      } catch {
-        // Never let one bad server abort startup.
-      }
+    // Visible "scanning" status so the brief startup probe never looks like a stall.
+    // Separate status key from the loaded-model widget; cleared in `finally`.
+    if (ctx.hasUI) {
+      ctx.ui.setStatus(SCAN_STATUS_KEY, ctx.ui.theme.fg("accent", "⟳ Crossbar: scanning for model servers…"));
     }
 
-    // 2) Auto-discover localhost; auto-register reachable no-auth servers, prompt for keyed ones.
     try {
-      const found = await discover();
-      for (const srv of found) {
-        const id = serverId(srv.kind, srv.baseUrl);
-        if (reg.get(id)) continue; // already known
-        if (srv.auth !== "none") {
-          if (ctx.hasUI) {
-            ctx.ui.notify(`Crossbar: found ${srv.label} (needs an API key) — run /crossbar to add it.`, "info");
-          }
-          continue;
-        }
-        const record: ServerRecord = {
-          id,
-          kind: srv.kind,
-          baseUrl: srv.baseUrl,
-          label: srv.label,
-          auth: "none",
-          enabled: true,
-          addedAt: Date.now(),
-          lastSeenAt: Date.now(),
-        };
-        await reg.add(record);
-        const count = await refreshAndRegister(reg, record);
-        if (ctx.hasUI && count > 0) {
-          ctx.ui.notify(`Crossbar: registered ${srv.label} (${count} models).`, "info");
+      // 1) Register every enabled server from the saved config.
+      for (const record of reg.list()) {
+        if (!record.enabled) continue;
+        try {
+          await refreshAndRegister(reg, record);
+        } catch {
+          // Never let one bad server abort startup.
         }
       }
-    } catch {
-      // Discovery is best-effort; the user can always add servers via /crossbar.
+
+      // 2) Auto-discover LOCALHOST ONLY (the LAN sweep is deferred to /crossbar so it
+      //    never blocks first paint). Localhost no-auth servers auto-register unless
+      //    turned off; keyed servers are surfaced for the user to add via /crossbar.
+      try {
+        const found = await discover({ includeLan: false });
+        lastDiscovered = found;
+        const autoRegister = reg.getSettings()?.autoRegisterLocalhost !== false; // default on
+        for (const srv of found) {
+          const id = serverId(srv.kind, srv.baseUrl);
+          if (reg.get(id)) continue; // already known
+          if (srv.auth !== "none" || !autoRegister) {
+            if (ctx.hasUI) {
+              const reason = srv.auth !== "none" ? "needs an API key" : "auto-register is off";
+              ctx.ui.notify(`Crossbar: found ${srv.label} (${reason}) — run /crossbar to add it.`, "info");
+            }
+            continue;
+          }
+          const record: ServerRecord = {
+            id,
+            kind: srv.kind,
+            baseUrl: srv.baseUrl,
+            label: srv.label,
+            auth: "none",
+            enabled: true,
+            addedAt: Date.now(),
+            lastSeenAt: Date.now(),
+          };
+          await reg.add(record);
+          const count = await refreshAndRegister(reg, record);
+          if (ctx.hasUI && count > 0) {
+            ctx.ui.notify(`Crossbar: registered ${srv.label} (${count} models).`, "info");
+          }
+        }
+      } catch {
+        // Discovery is best-effort; the user can always add servers via /crossbar.
+      }
+    } finally {
+      if (ctx.hasUI) ctx.ui.setStatus(SCAN_STATUS_KEY, undefined);
     }
 
     // 3) Loaded-model widget + health poll (UI modes only — a long-lived timer must
@@ -216,7 +242,14 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
       ctx.ui.notify("Crossbar is still initialising — try again in a moment.", "warning");
       return;
     }
-    await openOnboarding(pi, ctx, { registry, discover });
+    await openOnboarding(pi, ctx, {
+      registry,
+      discover: async () => {
+        lastDiscovered = await discover();
+        return lastDiscovered;
+      },
+      initialDiscovered: lastDiscovered,
+    });
     await widget?.refresh();
   };
 

@@ -39,6 +39,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { DiscoveredServer, ModelDescriptor, ServerRecord } from "../../src/core/types.ts";
 import { ServerRegistry } from "../../src/registry/registry.ts";
+import { registerServer } from "../../src/shim/provider-shim.ts";
 import { openOnboarding } from "../../src/ui/onboarding.ts";
 
 const model: ModelDescriptor = {
@@ -166,7 +167,7 @@ describe("openOnboarding navigation and registration", () => {
       null,
     ]);
 
-    await openOnboarding(pi, ctx, { registry, discover: async () => [server] });
+    await openOnboarding(pi, ctx, { registry, discover: async () => [server], initialDiscovered: [server] });
 
     const record = registry.list()[0]!;
     expect(record.lastKnownModels).toEqual([model]);
@@ -183,7 +184,7 @@ describe("openOnboarding navigation and registration", () => {
       null,
     ]);
 
-    await openOnboarding(pi, ctx, { registry, discover: async () => [server] });
+    await openOnboarding(pi, ctx, { registry, discover: async () => [server], initialDiscovered: [server] });
 
     expect(registerProvider).toHaveBeenCalledOnce();
     expect(setModel).not.toHaveBeenCalled();
@@ -191,18 +192,35 @@ describe("openOnboarding navigation and registration", () => {
 
   it("rescans without closing the server selector", async () => {
     const registry = makeRegistry();
-    const discover = vi.fn()
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([server]);
+    // Opening no longer auto-scans; only the __rescan__ action invokes discover().
+    const discover = vi.fn().mockResolvedValueOnce([server]);
     const { pi, ctx, custom } = makeHarness([
       "__rescan__",
       null,
     ]);
 
-    await openOnboarding(pi, ctx, { registry, discover });
+    await openOnboarding(pi, ctx, { registry, discover, initialDiscovered: [] });
 
-    expect(discover).toHaveBeenCalledTimes(2);
+    expect(discover).toHaveBeenCalledTimes(1);
     expect(custom).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets you pick a model to use in Pi from a server's manage menu", async () => {
+    const record = makeRecord();
+    const registry = makeRegistry([record]);
+    const { pi, ctx, setModel } = makeHarness([
+      record.baseUrl, // server selector → open management
+      "use", // manage menu → "Use a model in Pi"
+      model.id, // model picker → choose model
+      null, // manage menu → Esc back
+      null, // server selector → Esc closes
+    ]);
+    // Register the provider so its model is findable in Pi (as at runtime).
+    await registerServer(pi, registry, record, [model]);
+
+    await openOnboarding(pi, ctx, { registry, discover: async () => [] });
+
+    expect(setModel).toHaveBeenCalledOnce();
   });
 
   it("persists the refreshed catalogue when re-enabling a server whose models changed", async () => {
@@ -268,9 +286,31 @@ describe("openOnboarding navigation and registration", () => {
       null,
     ]);
 
-    await openOnboarding(pi, ctx, { registry, discover: async () => [server] });
+    await openOnboarding(pi, ctx, { registry, discover: async () => [server], initialDiscovered: [server] });
 
     expect(registerProvider).not.toHaveBeenCalled();
     expect(custom).toHaveBeenCalledTimes(2);
+  });
+
+  it("manages probe ports via overlay (remove one port from custom list)", async () => {
+    const registry = makeRegistry();
+    // Seed a custom override (setSettings is public and uses the mock persist).
+    await registry.setSettings({ probePorts: [11434, 8080, 5000] });
+
+    const { pi, ctx, custom } = makeHarness([
+      "__settings__", // server → settings
+      "edit-ports",   // settings → ports overlay
+      "port:11434",   // ports → remove 11434; re-renders ports list
+      "back",         // ports → back to settings
+      null,           // settings → back to server selector
+      null,           // server selector closes
+    ]);
+
+    await openOnboarding(pi, ctx, { registry, discover: async () => [], initialDiscovered: [] });
+
+    const after = registry.getSettings();
+    expect(after?.probePorts).toEqual([8080, 5000]); // removed first, order preserved from effective
+    // customs: server, settings, ports1, ports2, settings2, server2
+    expect(custom).toHaveBeenCalledTimes(6);
   });
 });

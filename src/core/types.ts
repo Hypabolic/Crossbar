@@ -157,6 +157,12 @@ export interface CrossbarSettings {
   lanHosts?: string[];
   /** Override the default localhost probe ports. */
   probePorts?: number[];
+  /**
+   * Auto-register reachable no-auth servers found on localhost at startup (default
+   * true). LAN servers are never auto-registered — they are always added explicitly
+   * via `/crossbar`. Set false to require every server to be added by hand.
+   */
+  autoRegisterLocalhost?: boolean;
 }
 
 export interface CrossbarConfigFile {
