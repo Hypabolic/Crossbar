@@ -3,38 +3,13 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## Unreleased
+## [0.4.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.4.0) — 2026-06-22
 
 ### Features
-
-- Programmatic provider preload: async factory preloads enabled servers with cached `lastKnownModels`
-  before Pi model resolution. Enables `--list-models`, print/JSON/RPC, CLI selection, and `--offline`
-  from persisted catalogue with no network or `/crossbar` session. (`src/preload.ts`,
-  `registerCachedServer`, `setLastKnownModels`, `catalogueChanged`).
-- Discovery settings UI: `/crossbar → ⚙ Discovery settings` toggles LAN discovery and edits the LAN
-  host / probe-port lists, persisted to `crossbar.json` and applied on the next scan.
-- LAN subnet auto-scan: enabling LAN discovery with no explicit hosts now auto-detects the machine's
-  own private subnet(s) at runtime (`src/discovery/subnet.ts`) and sweeps them; host entries accept
-  CIDR (`10.0.1.0/24`) and ranges (`10.0.1.10-50`), expanded and capped at 1024 addresses.
-- Faster LAN sweep: a `livenessFirst` gate in `discoverLan` does one cheap probe per address before the
-  adapter fan-out, so dead IPs cost a single socket and concurrency can run at 128. A full `/24` sweep
-  drops from ~44 s to ~3 s.
+- Provider preload, discovery settings, LAN subnet auto-scan (#11) ([209a38e](https://github.com/Hypabolic/Crossbar/commit/209a38e85f35a2a622bc2e1590f3ee17c04d3427))
 
 ### Documentation
-
-- Updated README, ARCHITECTURE, CHANGELOG, and RESEARCH notes for two-phase startup (factory preload
-  from cache; `session_start` live), cold-start limitation, and removal of the temporary "No models
-  available" text.
-- Added regression coverage and CLI integration tests.
-
-### Bug Fixes
-
-- Register keyless local providers with a resolved non-secret placeholder so Pi can send requests.
-- Make `/crossbar` navigation persistent, add Back/rescan paths, and show loaded models in a detail view.
-- Register newly added servers immediately and select models through Pi's extension API.
-- Persist `CrossbarSettings` (LAN discovery, hosts, probe ports) across server mutations — the registry
-  now round-trips settings in `flush()`, so adding/toggling a server no longer wipes them from `crossbar.json`.
+- V0.3.0 [skip ci] ([9d98ac3](https://github.com/Hypabolic/Crossbar/commit/9d98ac3de2231fecd823ec6301d665c801686e05))
 
 ## [0.3.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.3.0) — 2026-06-21
 
