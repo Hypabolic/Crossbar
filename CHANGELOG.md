@@ -3,6 +3,14 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.4.1](https://github.com/Hypabolic/Crossbar/releases/tag/v0.4.1) — 2026-06-22
+
+### Bug Fixes
+- Label not-in-scan servers from polled health, not scan-absence (#12) ([225064c](https://github.com/Hypabolic/Crossbar/commit/225064ca6d660e60d203576aa32b29722533573c))
+
+### Documentation
+- V0.4.0 [skip ci] ([d444124](https://github.com/Hypabolic/Crossbar/commit/d4441241ea9e4e290ab1bef2b05d7b65d1d3d402))
+
 ## [0.4.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.4.0) — 2026-06-22
 
 ### Features
