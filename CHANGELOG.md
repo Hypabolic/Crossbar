@@ -3,6 +3,14 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.5.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.5.0) — 2026-06-22
+
+### Features
+- Active-model status, model selection, discovery UX + controls (#13) ([f11a53e](https://github.com/Hypabolic/Crossbar/commit/f11a53e84c4102de787551edea24ee271a65b9f2))
+
+### Documentation
+- V0.4.1 [skip ci] ([89aafe4](https://github.com/Hypabolic/Crossbar/commit/89aafe40860df2cae99f8137e6cb4ff07bbb6e13))
+
 ## [0.4.1](https://github.com/Hypabolic/Crossbar/releases/tag/v0.4.1) — 2026-06-22
 
 ### Bug Fixes
