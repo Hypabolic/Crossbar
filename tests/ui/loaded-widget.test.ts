@@ -1,18 +1,18 @@
 /**
  * Unit tests for src/ui/loaded-widget.ts
  *
- * Tests cover the two pure functions:
- *   - formatLoadedStatus: formatting, markers, (last-known) suffix, empty state.
- *   - computeLoadedEntries: introspection path, last-known fallback, per-server failure isolation.
+ * Tests cover the new pure functions:
+ *   - formatActiveModel: null/empty, markers ●/○, (last-known), unhealthy ✕ + auth/unreachable/degraded
+ *   - computeActiveEntry: no active, unknown provider, introspection success+update, introspect throw→last-known, non-introspect→last-known
  *
  * No Pi runtime, no network I/O, no filesystem.
  */
 
 import { describe, it, expect, vi } from "vitest";
 import {
-  formatLoadedStatus,
-  computeLoadedEntries,
-  type LoadedEntry,
+  formatActiveModel,
+  computeActiveEntry,
+  type ActiveEntry,
 } from "../../src/ui/loaded-widget.ts";
 import type { ServerRegistry } from "../../src/registry/registry.ts";
 import type { ServerRecord, LoadedState, Probe } from "../../src/core/types.ts";
@@ -30,92 +30,93 @@ const fakeTheme = {
 } as const;
 
 // ---------------------------------------------------------------------------
-// formatLoadedStatus
+// formatActiveModel
 // ---------------------------------------------------------------------------
 
-describe("formatLoadedStatus", () => {
-  it("returns 'no servers' for an empty entry list", () => {
-    expect(formatLoadedStatus([], fakeTheme)).toBe("no servers");
+describe("formatActiveModel", () => {
+  it("returns empty string for null", () => {
+    expect(formatActiveModel(null, fakeTheme)).toBe("");
   });
 
-  it("uses filled marker (●) for introspection source", () => {
-    const entries: LoadedEntry[] = [
-      { label: "Ollama", loaded: ["llama3.1"], source: "introspection" },
-    ];
-    const result = formatLoadedStatus(entries, fakeTheme);
+  it("renders ● and label:modelId for healthy + loaded (introspection)", () => {
+    const entry: ActiveEntry = {
+      label: "Ollama",
+      modelId: "llama3.1",
+      loaded: true,
+      source: "introspection",
+      health: "healthy",
+    };
+    const result = formatActiveModel(entry, fakeTheme);
     expect(result).toContain("●");
-    expect(result).toContain("Ollama:llama3.1");
+    expect(result).toContain("Ollama: llama3.1");
     expect(result).not.toContain("(last-known)");
+    expect(result).not.toContain("✕");
   });
 
-  it("uses clock marker (◷) and appends (last-known) for last-known source", () => {
-    const entries: LoadedEntry[] = [
-      { label: "vLLM", loaded: ["qwen"], source: "last-known" },
-    ];
-    const result = formatLoadedStatus(entries, fakeTheme);
-    expect(result).toContain("◷");
-    expect(result).toContain("vLLM:qwen");
+  it("renders ○ for healthy + not loaded", () => {
+    const entry: ActiveEntry = {
+      label: "Ollama",
+      modelId: "llama3.1",
+      loaded: false,
+      source: "introspection",
+    };
+    const result = formatActiveModel(entry, fakeTheme);
+    expect(result).toContain("○");
+    expect(result).toContain("Ollama: llama3.1");
+  });
+
+  it("renders ✕ and unreachable (not the model) for unreachable health", () => {
+    const entry: ActiveEntry = {
+      label: "Ollama",
+      modelId: "llama3.1",
+      loaded: true,
+      source: "last-known",
+      health: "unreachable",
+    };
+    const result = formatActiveModel(entry, fakeTheme);
+    expect(result).toContain("✕");
+    expect(result).toContain("Ollama: unreachable");
+    expect(result).not.toContain("llama3.1");
+  });
+
+  it("renders auth detail for unauthorized", () => {
+    const entry: ActiveEntry = {
+      label: "vLLM",
+      modelId: "qwen",
+      loaded: false,
+      source: "last-known",
+      health: "unauthorized",
+    };
+    const result = formatActiveModel(entry, fakeTheme);
+    expect(result).toContain("✕");
+    expect(result).toContain("vLLM: auth");
+  });
+
+  it("renders (last-known) suffix when source is last-known (and not unhealthy)", () => {
+    const entry: ActiveEntry = {
+      label: "LM Studio",
+      modelId: "mistral",
+      loaded: true,
+      source: "last-known",
+    };
+    const result = formatActiveModel(entry, fakeTheme);
+    expect(result).toContain("●");
+    expect(result).toContain("LM Studio: mistral");
     expect(result).toContain("(last-known)");
-  });
-
-  it("uses clock marker (◷) and appends (last-known) for unknown source", () => {
-    const entries: LoadedEntry[] = [
-      { label: "Generic", loaded: ["model-x"], source: "unknown" },
-    ];
-    const result = formatLoadedStatus(entries, fakeTheme);
-    expect(result).toContain("◷");
-    expect(result).toContain("(last-known)");
-  });
-
-  it("renders multiple servers separated by double-space", () => {
-    const entries: LoadedEntry[] = [
-      { label: "Ollama", loaded: ["llama3.1"], source: "introspection" },
-      { label: "vLLM", loaded: ["qwen"], source: "last-known" },
-    ];
-    const result = formatLoadedStatus(entries, fakeTheme);
-    expect(result).toContain("Ollama:llama3.1");
-    expect(result).toContain("vLLM:qwen");
-    // Two server sections joined by "  "
-    expect(result).toMatch(/Ollama:llama3\.1\s{2}.*vLLM:qwen/);
-  });
-
-  it("renders idle entry for introspection with empty loaded list", () => {
-    const entries: LoadedEntry[] = [
-      { label: "LM Studio", loaded: [], source: "introspection" },
-    ];
-    const result = formatLoadedStatus(entries, fakeTheme);
-    expect(result).toContain("LM Studio:idle");
-    expect(result).not.toContain("(last-known)");
-  });
-
-  it("renders idle entry with (last-known) for last-known with empty loaded list", () => {
-    const entries: LoadedEntry[] = [
-      { label: "Ollama", loaded: [], source: "last-known" },
-    ];
-    const result = formatLoadedStatus(entries, fakeTheme);
-    expect(result).toContain("Ollama:idle");
-    expect(result).toContain("(last-known)");
-  });
-
-  it("renders multiple loaded models per server as separate parts", () => {
-    const entries: LoadedEntry[] = [
-      { label: "Ollama", loaded: ["modelA", "modelB"], source: "introspection" },
-    ];
-    const result = formatLoadedStatus(entries, fakeTheme);
-    expect(result).toContain("Ollama:modelA");
-    expect(result).toContain("Ollama:modelB");
   });
 
   it("calls theme.fg for theming (not raw ANSI)", () => {
     const themeWithSpy = {
       fg: vi.fn((_token: string, text: string) => text),
     };
-    const entries: LoadedEntry[] = [
-      { label: "Ollama", loaded: ["llama3.1"], source: "introspection" },
-    ];
-    formatLoadedStatus(entries, themeWithSpy);
+    const entry: ActiveEntry = {
+      label: "Ollama",
+      modelId: "llama3.1",
+      loaded: true,
+      source: "introspection",
+    };
+    formatActiveModel(entry, themeWithSpy);
     expect(themeWithSpy.fg).toHaveBeenCalled();
-    // All calls must pass a string token, never raw ANSI
     for (const call of themeWithSpy.fg.mock.calls) {
       const token = call[0] as string;
       expect(typeof token).toBe("string");
@@ -123,32 +124,22 @@ describe("formatLoadedStatus", () => {
     }
   });
 
-  it("surfaces an unreachable server instead of its (stale) loaded models", () => {
-    const entries: LoadedEntry[] = [
-      { label: "Ollama", loaded: ["llama3.1"], source: "last-known", health: "unreachable" },
-    ];
-    const result = formatLoadedStatus(entries, fakeTheme);
-    expect(result).toContain("Ollama:unreachable");
-    expect(result).not.toContain("llama3.1");
-  });
-
-  it("shows an auth indicator for unauthorized servers", () => {
-    const entries: LoadedEntry[] = [
-      { label: "vLLM", loaded: [], source: "last-known", health: "unauthorized" },
-    ];
-    expect(formatLoadedStatus(entries, fakeTheme)).toContain("vLLM:auth");
-  });
-
-  it("shows live models normally when health is healthy", () => {
-    const entries: LoadedEntry[] = [
-      { label: "Ollama", loaded: ["llama3.1"], source: "introspection", health: "healthy" },
-    ];
-    expect(formatLoadedStatus(entries, fakeTheme)).toContain("Ollama:llama3.1");
+  it("renders degraded health with ✕", () => {
+    const entry: ActiveEntry = {
+      label: "llama.cpp",
+      modelId: "Qwen3",
+      loaded: true,
+      source: "introspection",
+      health: "degraded",
+    };
+    const result = formatActiveModel(entry, fakeTheme);
+    expect(result).toContain("✕");
+    expect(result).toContain("llama.cpp: degraded");
   });
 });
 
 // ---------------------------------------------------------------------------
-// Helpers for computeLoadedEntries
+// Helpers for computeActiveEntry
 // ---------------------------------------------------------------------------
 
 /** Make a minimal ServerRecord for test use. */
@@ -183,7 +174,7 @@ class FakeCredentialStore {
 
 /**
  * Build a fake ServerRegistry backed by an in-memory list.
- * Only the methods computeLoadedEntries calls are implemented.
+ * Only the methods computeActiveEntry calls are implemented (get, resolve, updateHealthCache, getHealth).
  */
 function makeFakeRegistry(records: ServerRecord[]): ServerRegistry {
   const store = new FakeCredentialStore();
@@ -197,7 +188,7 @@ function makeFakeRegistry(records: ServerRecord[]): ServerRegistry {
     async resolveCredential(_record: ServerRecord) {
       return { mode: "none" as const };
     },
-    // Remaining methods are stubs that should never be called in these tests
+    // Remaining methods are stubs
     load: () => {
       throw new Error("not implemented");
     },
@@ -213,8 +204,6 @@ function makeFakeRegistry(records: ServerRecord[]): ServerRegistry {
     setEnabled: async () => {
       throw new Error("not implemented");
     },
-    // computeLoadedEntries persists the live snapshot and reads health; both are
-    // exercised here, so provide working no-op/empty implementations.
     updateHealthCache: () => {},
     setHealth: () => {},
     getHealth: () => undefined,
@@ -268,10 +257,10 @@ function makeNonIntrospectableAdapter(kind: BackendKind): BackendAdapter {
 }
 
 // ---------------------------------------------------------------------------
-// computeLoadedEntries — module-level mock of adapter resolution
+// computeActiveEntry — module-level mock of adapter resolution
 // ---------------------------------------------------------------------------
 
-// We mock the adapters/index.ts module so computeLoadedEntries uses our fake adapters.
+// We mock the adapters/index.ts module so computeActiveEntry uses our fake adapters.
 vi.mock("../../src/adapters/index.ts", async () => {
   // Keep canIntrospect real (it's from core, not adapters) and only override adapterFor.
   const realAdapters = await vi.importActual<typeof import("../../src/adapters/index.ts")>(
@@ -304,148 +293,141 @@ vi.mock("../../src/discovery/probe.ts", () => ({
 const __testAdapterMap = new Map<BackendKind, BackendAdapter>();
 
 // ---------------------------------------------------------------------------
-// computeLoadedEntries tests
+// computeActiveEntry tests
 // ---------------------------------------------------------------------------
 
-describe("computeLoadedEntries", () => {
-  it("returns empty array when no enabled servers", async () => {
+describe("computeActiveEntry", () => {
+  it("returns null when active === undefined", async () => {
     const registry = makeFakeRegistry([]);
-    const entries = await computeLoadedEntries(registry);
-    expect(entries).toEqual([]);
+    const entry = await computeActiveEntry(registry, undefined);
+    expect(entry).toBeNull();
   });
 
-  it("skips disabled servers", async () => {
-    const record = makeRecord({ id: "r1", kind: "ollama", enabled: false });
+  it("returns null when active provider not in registry", async () => {
+    const record = makeRecord({ id: "r1", kind: "ollama" });
     const registry = makeFakeRegistry([record]);
-    const entries = await computeLoadedEntries(registry);
-    expect(entries).toHaveLength(0);
+    const entry = await computeActiveEntry(registry, { provider: "unknown", id: "m1" });
+    expect(entry).toBeNull();
   });
 
-  it("uses introspection when adapter canIntrospect and succeeds", async () => {
+  it("uses introspection when adapter canIntrospect, records loaded:true when id present, and calls updateHealthCache", async () => {
     const loadedState: LoadedState = {
-      loadedModelIds: ["llama3.1"],
+      loadedModelIds: ["llama3.1", "other"],
       source: "introspection",
     };
     __testAdapterMap.set("ollama", makeIntrospectableAdapter("ollama", loadedState));
 
-    const record = makeRecord({ id: "r1", kind: "ollama", label: "Ollama", enabled: true });
+    const record = makeRecord({ id: "srv1", kind: "ollama", label: "Ollama", enabled: true });
     const registry = makeFakeRegistry([record]);
-    const entries = await computeLoadedEntries(registry);
 
-    expect(entries).toHaveLength(1);
-    const entry = entries[0];
+    const writes: string[][] = [];
+    const regWithSpy = {
+      ...registry,
+      updateHealthCache: (id: string, patch: { loaded?: string[] }) => {
+        if (patch.loaded) writes.push(patch.loaded);
+      },
+    } as unknown as ServerRegistry;
+
+    const entry = await computeActiveEntry(regWithSpy, { provider: "srv1", id: "llama3.1" });
+
+    expect(entry).not.toBeNull();
     expect(entry?.source).toBe("introspection");
-    expect(entry?.loaded).toEqual(["llama3.1"]);
+    expect(entry?.loaded).toBe(true);
+    expect(entry?.modelId).toBe("llama3.1");
     expect(entry?.label).toBe("Ollama");
+    expect(writes).toEqual([["llama3.1", "other"]]);
 
     __testAdapterMap.delete("ollama");
   });
 
-  it("falls back to last-known when adapter does NOT canIntrospect", async () => {
+  it("returns loaded:false via introspection when id not in loaded list", async () => {
+    __testAdapterMap.set(
+      "ollama",
+      makeIntrospectableAdapter("ollama", { loadedModelIds: ["other"], source: "introspection" }),
+    );
+    const record = makeRecord({ id: "s1", kind: "ollama", enabled: true });
+    const registry = makeFakeRegistry([record]);
+    const entry = await computeActiveEntry(registry, { provider: "s1", id: "target" });
+    expect(entry?.loaded).toBe(false);
+    expect(entry?.source).toBe("introspection");
+    __testAdapterMap.delete("ollama");
+  });
+
+  it("falls back to last-known (loaded derived from record.lastKnownLoaded) when adapter does NOT canIntrospect", async () => {
     __testAdapterMap.set("openai", makeNonIntrospectableAdapter("openai"));
 
     const record = makeRecord({
-      id: "r2",
+      id: "cloud",
       kind: "openai",
       label: "OpenAI",
       enabled: true,
       lastKnownLoaded: ["gpt-4o"],
     });
     const registry = makeFakeRegistry([record]);
-    const entries = await computeLoadedEntries(registry);
+    const entry = await computeActiveEntry(registry, { provider: "cloud", id: "gpt-4o" });
 
-    expect(entries).toHaveLength(1);
-    const entry = entries[0];
     expect(entry?.source).toBe("last-known");
-    expect(entry?.loaded).toEqual(["gpt-4o"]);
+    expect(entry?.loaded).toBe(true);
+    expect(entry?.modelId).toBe("gpt-4o");
 
     __testAdapterMap.delete("openai");
   });
 
-  it("falls back to empty loaded list when last-known is undefined", async () => {
+  it("uses last-known empty when no lastKnownLoaded and non-introspect", async () => {
     __testAdapterMap.set("vllm", makeNonIntrospectableAdapter("vllm"));
 
     const record = makeRecord({
-      id: "r3",
+      id: "v1",
       kind: "vllm",
       label: "vLLM",
       enabled: true,
-      // no lastKnownLoaded
     });
     const registry = makeFakeRegistry([record]);
-    const entries = await computeLoadedEntries(registry);
+    const entry = await computeActiveEntry(registry, { provider: "v1", id: "any" });
 
-    expect(entries).toHaveLength(1);
-    expect(entries[0]?.loaded).toEqual([]);
-    expect(entries[0]?.source).toBe("last-known");
+    expect(entry?.source).toBe("last-known");
+    expect(entry?.loaded).toBe(false);
 
     __testAdapterMap.delete("vllm");
   });
 
-  it("isolates per-server failure: failed server degrades to last-known, others succeed", async () => {
-    const failingAdapter = makeIntrospectableAdapter("ollama", new Error("network error"));
-    const successAdapter = makeIntrospectableAdapter("lmstudio", {
-      loadedModelIds: ["mistral"],
-      source: "introspection",
+  it("degrades to last-known (using record.lastKnownLoaded) when introspect throws", async () => {
+    __testAdapterMap.set("ollama", makeIntrospectableAdapter("ollama", new Error("boom")));
+
+    const record = makeRecord({
+      id: "r1",
+      kind: "ollama",
+      label: "Ollama",
+      enabled: true,
+      lastKnownLoaded: ["cached-m"],
     });
+    const registry = makeFakeRegistry([record]);
+    const entry = await computeActiveEntry(registry, { provider: "r1", id: "cached-m" });
 
-    __testAdapterMap.set("ollama", failingAdapter);
-    __testAdapterMap.set("lmstudio", successAdapter);
-
-    const records = [
-      makeRecord({
-        id: "r1",
-        kind: "ollama",
-        label: "Ollama",
-        enabled: true,
-        lastKnownLoaded: ["cached-model"],
-      }),
-      makeRecord({
-        id: "r2",
-        kind: "lmstudio",
-        label: "LM Studio",
-        baseUrl: "http://127.0.0.1:1234",
-        enabled: true,
-      }),
-    ];
-    const registry = makeFakeRegistry(records);
-
-    const entries = await computeLoadedEntries(registry);
-
-    expect(entries).toHaveLength(2);
-
-    const ollamaEntry = entries.find((e) => e.label === "Ollama");
-    const lmEntry = entries.find((e) => e.label === "LM Studio");
-
-    // Ollama failed: degrades to last-known
-    expect(ollamaEntry?.source).toBe("last-known");
-    expect(ollamaEntry?.loaded).toEqual(["cached-model"]);
-
-    // LM Studio succeeded via introspection
-    expect(lmEntry?.source).toBe("introspection");
-    expect(lmEntry?.loaded).toEqual(["mistral"]);
+    expect(entry?.source).toBe("last-known");
+    expect(entry?.loaded).toBe(true);
+    expect(entry?.modelId).toBe("cached-m");
 
     __testAdapterMap.delete("ollama");
-    __testAdapterMap.delete("lmstudio");
   });
 
-  it("never throws even when all servers fail", async () => {
-    __testAdapterMap.set("ollama", makeIntrospectableAdapter("ollama", new Error("all fail")));
+  it("never throws and returns last-known shape on introspection failure", async () => {
+    __testAdapterMap.set("ollama", makeIntrospectableAdapter("ollama", new Error("fail")));
 
-    const record = makeRecord({ id: "r1", kind: "ollama", enabled: true });
+    const record = makeRecord({ id: "r1", kind: "ollama", enabled: true, lastKnownLoaded: [] });
     const registry = makeFakeRegistry([record]);
 
-    await expect(computeLoadedEntries(registry)).resolves.toHaveLength(1);
-    const entries = await computeLoadedEntries(registry);
-    expect(entries[0]?.source).toBe("last-known");
+    await expect(computeActiveEntry(registry, { provider: "r1", id: "x" })).resolves.not.toBeNull();
+    const entry = await computeActiveEntry(registry, { provider: "r1", id: "x" });
+    expect(entry?.source).toBe("last-known");
 
     __testAdapterMap.delete("ollama");
   });
 
-  it("persists the live snapshot to the cache and attaches polled health", async () => {
+  it("persists live snapshot via updateHealthCache and attaches health on successful introspection for the active", async () => {
     __testAdapterMap.set(
       "ollama",
-      makeIntrospectableAdapter("ollama", { loadedModelIds: ["llama3.1"], source: "introspection" }),
+      makeIntrospectableAdapter("ollama", { loadedModelIds: ["act"], source: "introspection" }),
     );
     const record = makeRecord({ id: "r1", kind: "ollama", label: "Ollama", enabled: true });
 
@@ -453,19 +435,33 @@ describe("computeLoadedEntries", () => {
     const base = makeFakeRegistry([record]) as unknown as Record<string, unknown>;
     const registry = {
       ...base,
-      list: () => [record],
+      get: (id: string) => (id === "r1" ? record : undefined),
       resolveCredential: async () => ({ mode: "none" as const }),
       updateHealthCache: (_id: string, patch: { loaded?: string[] }) => {
         if (patch.loaded) loadedWrites.push(patch.loaded);
       },
-      getHealth: () => "degraded" as const,
-      setHealth: () => {},
+      getHealth: () => "healthy" as const,
     } as unknown as ServerRegistry;
 
-    const entries = await computeLoadedEntries(registry);
+    const entry = await computeActiveEntry(registry, { provider: "r1", id: "act" });
 
-    expect(loadedWrites).toEqual([["llama3.1"]]); // live snapshot persisted
-    expect(entries[0]?.health).toBe("degraded"); // polled health attached
+    expect(loadedWrites).toEqual([["act"]]);
+    expect(entry?.health).toBe("healthy");
+    expect(entry?.source).toBe("introspection");
+
+    __testAdapterMap.delete("ollama");
+  });
+
+  it("skips introspection (uses last-known) for disabled record even if active", async () => {
+    __testAdapterMap.set("ollama", makeIntrospectableAdapter("ollama", { loadedModelIds: ["foo"], source: "introspection" }));
+
+    const record = makeRecord({ id: "d1", kind: "ollama", enabled: false, lastKnownLoaded: ["bar"] });
+    const registry = makeFakeRegistry([record]);
+    const entry = await computeActiveEntry(registry, { provider: "d1", id: "bar" });
+
+    // Should not have called introspect (would have thrown if map not set? but mainly source)
+    expect(entry?.source).toBe("last-known");
+    expect(entry?.loaded).toBe(true);
 
     __testAdapterMap.delete("ollama");
   });

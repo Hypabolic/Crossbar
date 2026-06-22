@@ -1,15 +1,14 @@
 /**
  * Live "currently loaded" model widget for Crossbar.
  *
- * Two public surfaces:
+ * Shows ONLY the model Pi currently has active (if it comes from a Crossbar server).
+ * Nothing is shown when the active model is not from Crossbar (cloud, none, or other provider).
  *
- *  1. PURE, UNIT-TESTABLE functions:
- *     - `formatLoadedStatus` — renders the status string from pre-computed entries.
- *     - `computeLoadedEntries` — fetches live loaded state from each enabled server,
- *       falling back to lastKnownLoaded when introspection is unavailable.
+ * Pure functions:
+ *  - `formatActiveModel`
+ *  - `computeActiveEntry`
  *
- *  2. `installLoadedWidget` — wires everything to Pi's `ctx.ui.setStatus`, subscribes
- *     to `model_select`, and exposes a `refresh()` the health-poll loop calls.
+ * `installLoadedWidget` wires to Pi setStatus, on model_select + health poll.
  *
  * Hard rules:
  *  - Never modify src/core/, src/adapters/, src/registry/.
@@ -24,169 +23,124 @@ import { adapterFor } from "../adapters/index.ts";
 import { canIntrospect } from "../core/backend-adapter.ts";
 import { createProbe } from "../discovery/probe.ts";
 import type { ServerRegistry } from "../registry/registry.ts";
-import type { HealthState, LoadedState } from "../core/types.ts";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/** One entry per enabled server, ready for formatting. */
-export interface LoadedEntry {
-  /** Human label for the server, e.g. "Ollama". */
-  label: string;
-  /** Currently-loaded model ids (may be empty). */
-  loaded: string[];
-  /** Whether the data came from a live introspection call or a cache. */
-  source: LoadedState["source"];
-  /** Latest polled health state, when known. Drives a degraded/unreachable indicator. */
-  health?: HealthState;
-}
+import type { HealthState } from "../core/types.ts";
 
 // ---------------------------------------------------------------------------
 // Pure formatter — no I/O, fully unit-testable
 // ---------------------------------------------------------------------------
 
+export interface ActiveEntry {
+  /** Server label (from record.label). */
+  label: string;
+  /** The active model's id (from ctx.model.id). */
+  modelId: string;
+  /** True if the model was reported present in the latest loaded snapshot. */
+  loaded: boolean;
+  /** "introspection" if derived from live adapter call this refresh; else "last-known". */
+  source: "introspection" | "last-known";
+  /** Latest polled health (if any). Unhealthy states change the rendering. */
+  health?: HealthState;
+}
+
 /**
- * Render a compact status string from pre-computed loaded entries.
+ * Render status for the single active Crossbar model (or "" to clear).
  *
- * Examples:
- *   live:      "● Ollama:llama3.1"
- *   last-known "◷ vLLM:qwen (last-known)"
- *   empty set  "no servers"
- *   multi      "● Ollama:llama3.1  ◷ vLLM:qwen (last-known)"
+ * - null/empty → ""
+ * - unhealthy (unreachable|degraded|unauthorized) → "✕ label:auth|unreachable|degraded"
+ * - else → "● label:modelId" (or "○" if not loaded) + optional " (last-known)"
  *
- * Uses only `theme.fg(token, text)` with tokens: accent/success/dim/muted/warning.
+ * Uses ONLY theme.fg(token, str) with: accent / success / dim / muted / warning.
  */
-export function formatLoadedStatus(
-  entries: LoadedEntry[],
+export function formatActiveModel(
+  entry: ActiveEntry | null,
   theme: Pick<Theme, "fg">,
 ): string {
-  if (entries.length === 0) {
-    return theme.fg("muted", "no servers");
+  if (!entry) return "";
+
+  if (
+    entry.health === "unreachable" ||
+    entry.health === "degraded" ||
+    entry.health === "unauthorized"
+  ) {
+    const detail = entry.health === "unauthorized" ? "auth" : entry.health;
+    return `${theme.fg("warning", "✕")} ${theme.fg("dim", `${entry.label}: ${detail}`)}`;
   }
 
-  const parts: string[] = [];
-
-  for (const entry of entries) {
-    // Unhealthy servers take precedence over loaded state — surface why we can't
-    // show live models rather than implying the server is idle.
-    if (entry.health === "unreachable" || entry.health === "degraded" || entry.health === "unauthorized") {
-      const detail =
-        entry.health === "unauthorized" ? "auth" : entry.health === "degraded" ? "degraded" : "unreachable";
-      parts.push(`${theme.fg("warning", "✕")} ${theme.fg("dim", `${entry.label}:${detail}`)}`);
-      continue;
-    }
-
-    const isLive = entry.source === "introspection";
-
-    if (entry.loaded.length === 0) {
-      // Server known but no model loaded
-      const marker = isLive
-        ? theme.fg("dim", "○")
-        : theme.fg("warning", "◷");
-      const label = theme.fg("dim", `${entry.label}:idle`);
-      const suffix = isLive ? "" : theme.fg("dim", " (last-known)");
-      parts.push(`${marker} ${label}${suffix}`);
-    } else {
-      for (const modelId of entry.loaded) {
-        const marker = isLive
-          ? theme.fg("accent", "●")
-          : theme.fg("warning", "◷");
-        const text = isLive
-          ? theme.fg("success", `${entry.label}:${modelId}`)
-          : theme.fg("muted", `${entry.label}:${modelId}`);
-        const suffix = isLive ? "" : theme.fg("dim", " (last-known)");
-        parts.push(`${marker} ${text}${suffix}`);
-      }
-    }
-  }
-
-  return parts.join("  ");
+  const marker = entry.loaded
+    ? theme.fg("accent", "●")
+    : theme.fg("dim", "○");
+  const text = theme.fg("success", `${entry.label}: ${entry.modelId}`);
+  const suffix =
+    entry.source === "last-known" ? theme.fg("dim", " (last-known)") : "";
+  return `${marker} ${text}${suffix}`;
 }
 
 // ---------------------------------------------------------------------------
-// Entry computation — one network round-trip per server that supports introspection
+// Active entry computation — introspect ONLY the active server's provider
+// (≤1 network call per refresh). Never throws.
 // ---------------------------------------------------------------------------
 
 /**
- * For each enabled server in the registry:
- *   - If its adapter supports `IntrospectLoaded`, call `introspectLoaded` via a fresh
- *     Probe → source "introspection".
- *   - Otherwise fall back to `record.lastKnownLoaded` → source "last-known".
- *   - Per-server failures degrade that entry to "last-known" (never throw the whole batch).
+ * Compute the ActiveEntry for Pi's currently selected model (if any).
+ *
+ * - If no active, or active.provider not in registry → null (widget clears).
+ * - If the record supports introspection (and is enabled): do a live call for *that*
+ *   server only; on success updateHealthCache({loaded}) and derive `loaded` bool.
+ * - On failure or non-introspectable adapter: use record.lastKnownLoaded for the bool.
+ * - Health is always taken from the latest poll cache (if present).
  */
-export async function computeLoadedEntries(
+export async function computeActiveEntry(
   registry: ServerRegistry,
-): Promise<LoadedEntry[]> {
-  const records = registry.list().filter((r) => r.enabled);
-  const results = await Promise.allSettled(
-    records.map(async (record): Promise<LoadedEntry> => {
-      const adapter = adapterFor(record.kind);
+  active: { provider: string; id: string } | undefined,
+): Promise<ActiveEntry | null> {
+  if (!active) return null;
 
-      if (canIntrospect(adapter)) {
-        // Resolve credential for the probe
-        const cred = await registry.resolveCredential(record);
+  const record = registry.get(active.provider);
+  if (!record) return null;
 
-        // Build a minimal DiscoveredServer from the stored record
-        const server = {
-          kind: record.kind,
-          baseUrl: record.baseUrl,
-          auth: record.auth,
-          label: record.label,
-          confidence: 1,
-        } as const;
+  const health = registry.getHealth(record.id);
 
-        const probe = createProbe(record.baseUrl, { auth: cred });
+  const adapter = adapterFor(record.kind);
 
-        const state = await adapter.introspectLoaded(server, cred, probe);
-        // Persist the live snapshot so the "last-known" fallback has data when the
-        // server later goes offline (or for the next render before the poll runs).
-        registry.updateHealthCache(record.id, { loaded: state.loadedModelIds });
-        return {
-          label: record.label,
-          loaded: state.loadedModelIds,
-          source: "introspection" as const,
-          ...attachHealth(registry, record.id),
-        };
-      }
+  if (record.enabled && canIntrospect(adapter)) {
+    try {
+      const cred = await registry.resolveCredential(record);
 
-      // Fall back to last-known
+      const server = {
+        kind: record.kind,
+        baseUrl: record.baseUrl,
+        auth: record.auth,
+        label: record.label,
+        confidence: 1,
+      } as const;
+
+      const probe = createProbe(record.baseUrl, { auth: cred });
+
+      const state = await adapter.introspectLoaded(server, cred, probe);
+      registry.updateHealthCache(record.id, { loaded: state.loadedModelIds });
+      const loaded = state.loadedModelIds.includes(active.id);
       return {
         label: record.label,
-        loaded: record.lastKnownLoaded ?? [],
-        source: "last-known" as const,
-        ...attachHealth(registry, record.id),
+        modelId: active.id,
+        loaded,
+        source: "introspection",
+        ...(health !== undefined ? { health } : {}),
       };
-    }),
-  );
-
-  const entries: LoadedEntry[] = [];
-  for (let i = 0; i < results.length; i++) {
-    const result = results[i];
-    if (result === undefined) continue;
-    if (result.status === "fulfilled") {
-      entries.push(result.value);
-    } else {
-      // Per-server failure: degrade to last-known without throwing
-      const record = records[i];
-      if (record !== undefined) {
-        entries.push({
-          label: record.label,
-          loaded: record.lastKnownLoaded ?? [],
-          source: "last-known" as const,
-          ...attachHealth(registry, record.id),
-        });
-      }
+    } catch {
+      // degrade to last-known for this active model; do not throw
     }
   }
 
-  return entries;
-}
-
-/** Read the latest polled health for a server, as a spreadable partial entry. */
-function attachHealth(registry: ServerRegistry, id: string): { health?: HealthState } {
-  const health = registry.getHealth(id);
-  return health !== undefined ? { health } : {};
+  // last-known path (non-introspect, disabled, or introspect threw)
+  const last = record.lastKnownLoaded ?? [];
+  const loaded = last.includes(active.id);
+  return {
+    label: record.label,
+    modelId: active.id,
+    loaded,
+    source: "last-known" as const,
+    ...(health !== undefined ? { health } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -206,9 +160,11 @@ export interface LoadedWidgetHandle {
 /**
  * Wire the loaded-model widget to Pi's status bar.
  *
- * - Reads `ctx.ui.theme` each refresh so theme switches take effect immediately.
- * - Listens to `model_select` to refresh on user-driven model changes.
- * - Returns `{ refresh, dispose }` for the health-poll loop to drive.
+ * - Only shows status for the *active* ctx.model when its provider is a Crossbar server.
+ * - Uses `ctx.model` at refresh time.
+ * - Reads `ctx.ui.theme` each refresh.
+ * - Listens to `model_select`; also driven by external 15s poll calling refresh().
+ * - Returns `{ refresh, dispose }` for the health-poll loop.
  */
 export function installLoadedWidget(
   pi: ExtensionAPI,
@@ -217,9 +173,12 @@ export function installLoadedWidget(
 ): LoadedWidgetHandle {
   async function refresh(): Promise<void> {
     try {
-      const entries = await computeLoadedEntries(registry);
-      const text = formatLoadedStatus(entries, ctx.ui.theme);
-      ctx.ui.setStatus(STATUS_KEY, text);
+      const active = ctx.model
+        ? { provider: ctx.model.provider, id: ctx.model.id }
+        : undefined;
+      const entry = await computeActiveEntry(registry, active);
+      const text = formatActiveModel(entry, ctx.ui.theme);
+      ctx.ui.setStatus(STATUS_KEY, text.length > 0 ? text : undefined);
     } catch {
       // Silently suppress: the widget is best-effort; never crash the poll loop.
     }

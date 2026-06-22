@@ -28,6 +28,7 @@ import {
   normalizeManualUrl,
   parseHosts,
   parsePorts,
+  probePortDescription,
 } from "../../src/ui/onboarding.ts";
 
 import type { DiscoveredServer, HealthState, ModelDescriptor, ServerRecord } from "../../src/core/types.ts";
@@ -272,38 +273,70 @@ describe("parseHosts", () => {
 describe("buildSettingsItems", () => {
   it("reflects defaults when no settings are configured", () => {
     const items = buildSettingsItems({});
-    expect(items.map((i) => i.value)).toEqual(["toggle-lan", "edit-hosts", "edit-ports", "back"]);
-    expect(items[0]!.label).toContain("OFF");
-    expect(items[1]!.label).toContain("auto"); // blank hosts = auto-scan local subnet
-    expect(items[2]!.label).toContain("defaults");
+    expect(items.map((i) => i.value)).toEqual([
+      "toggle-autoreg",
+      "toggle-lan",
+      "edit-hosts",
+      "edit-ports",
+      "back",
+    ]);
+    expect(items[0]!.label).toContain("ON"); // localhost auto-register defaults on
+    expect(items[1]!.label).toContain("OFF"); // LAN discovery defaults off
+    expect(items[2]!.label).toContain("auto"); // blank hosts = auto-scan local subnet
+    expect(items[3]!.label).toContain("defaults");
   });
-  it("shows ON and the configured hosts/ports when set", () => {
+  it("shows the LAN/hosts/ports values when set", () => {
     const items = buildSettingsItems({
       lanDiscovery: true,
       lanHosts: ["192.168.1.50"],
       probePorts: [11434, 8080],
     });
-    expect(items[0]!.label).toContain("ON");
-    expect(items[1]!.label).toContain("192.168.1.50");
-    expect(items[2]!.label).toContain("11434");
-    expect(items[2]!.label).toContain("8080");
+    expect(items[1]!.label).toContain("ON");
+    expect(items[2]!.label).toContain("192.168.1.50");
+    expect(items[3]!.label).toContain("11434");
+    expect(items[3]!.label).toContain("8080");
+  });
+  it("shows auto-register OFF when disabled", () => {
+    const items = buildSettingsItems({ autoRegisterLocalhost: false });
+    expect(items[0]!.label).toBe("Auto-register localhost: OFF");
+  });
+});
+
+describe("probePortDescription", () => {
+  it("returns friendly names for known default ports", () => {
+    expect(probePortDescription(11434)).toContain("Ollama");
+    expect(probePortDescription(1234)).toContain("LM Studio");
+    expect(probePortDescription(8080)).toContain("llama.cpp");
+    expect(probePortDescription(8000)).toContain("vLLM");
+    expect(probePortDescription(5000)).toContain("TabbyAPI");
+    expect(probePortDescription(5001)).toContain("KoboldCpp");
+    expect(probePortDescription(1337)).toContain("Jan");
+  });
+  it("appends the remove hint for all ports", () => {
+    expect(probePortDescription(11434)).toContain("select to remove");
+    expect(probePortDescription(9000)).toContain("select to remove");
+  });
+  it('labels unknown ports as "custom"', () => {
+    expect(probePortDescription(4891)).toContain("custom");
   });
 });
 
 // ─── buildManageItems ─────────────────────────────────────────────────────────
 
 describe("buildManageItems", () => {
-  it("offers every capability action plus Disable, Remove, and Back", () => {
+  it("offers 'use' first, then every capability action plus Disable, Remove, and Back", () => {
     const values = buildManageItems(ollamaAdapter, true).map((i) => i.value);
+    expect(values[0]).toBe("use");
     expect(values).toEqual(
-      expect.arrayContaining(["switch", "load", "unload", "introspect", "disable", "remove", "back"]),
+      expect.arrayContaining(["use", "switch", "load", "unload", "introspect", "disable", "remove", "back"]),
     );
   });
 
-  it("offers Disable/Remove/Back for an enabled capability-less backend", () => {
+  it("offers 'Use a model in Pi' even for a capability-less backend", () => {
     for (const adapter of [vllmAdapter, openaiAdapter, anthropicAdapter, genericAdapter]) {
       const values = buildManageItems(adapter, true).map((i) => i.value);
-      expect(values).toEqual(["disable", "remove", "back"]);
+      // No switch/load/unload/introspect, but you can still point Pi at a model.
+      expect(values).toEqual(["use", "disable", "remove", "back"]);
     }
   });
 
