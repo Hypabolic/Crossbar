@@ -30,7 +30,7 @@ import {
   parsePorts,
 } from "../../src/ui/onboarding.ts";
 
-import type { DiscoveredServer, ModelDescriptor, ServerRecord } from "../../src/core/types.ts";
+import type { DiscoveredServer, HealthState, ModelDescriptor, ServerRecord } from "../../src/core/types.ts";
 
 // Real adapter singletons for capability-driven tests
 import { ollamaAdapter } from "../../src/adapters/ollama.ts";
@@ -118,11 +118,12 @@ describe("buildDiscoveredItems", () => {
     expect(items[0]!.description).toContain("Already registered");
   });
 
-  it("does NOT mark a server as added when it is new", () => {
+  it("marks a newly discovered, unregistered server as 'Discovered · not added'", () => {
     const discovered = [makeDiscovered()];
     const items = buildDiscoveredItems(discovered, []); // empty registry
     expect(items[0]!.label).not.toContain("(added)");
-    expect(items[0]!.description).toContain("healthy");
+    expect(items[0]!.description).toContain("Discovered");
+    expect(items[0]!.description).toContain("not added");
   });
 
   it("includes version in the description when present", () => {
@@ -164,7 +165,8 @@ describe("buildDiscoveredItems", () => {
     expect(items).toHaveLength(4);
     expect(items[0]!.value).toBe("http://127.0.0.1:1234");
     expect(items[0]!.label).toContain("(added)");
-    expect(items[0]!.description).toContain("not currently discovered");
+    // No health supplied → neutral, no reachability claim.
+    expect(items[0]!.description).toBe("Registered · not in this scan");
     expect(items[1]!.value).toBe("__rescan__");
     expect(items[2]!.value).toBe("__settings__");
     expect(items[3]!.value).toBe("__manual__");
@@ -200,6 +202,40 @@ describe("buildDiscoveredItems", () => {
     const items = buildDiscoveredItems([makeDiscovered()], [disabled]);
     expect(items[0]!.label).toContain("(disabled)");
     expect(items[0]!.description).toContain("server is reachable");
+  });
+});
+
+// ─── not-in-scan health labels ─────────────────────────────────────────────────
+
+describe("buildDiscoveredItems — not-in-scan health labels", () => {
+  const offline = makeRecord({
+    id: "crossbar-lmstudio-127-0-0-1-1234",
+    kind: "lmstudio",
+    baseUrl: "http://127.0.0.1:1234",
+    label: "LM Studio (127.0.0.1:1234)",
+  });
+
+  const describeFor = (health: HealthState | undefined): string | undefined =>
+    buildDiscoveredItems([], [offline], () => health)[0]!.description;
+
+  it("reports a polled healthy server as healthy, not 'not reachable'", () => {
+    expect(describeFor("healthy")).toBe("Registered · ✓ healthy");
+  });
+
+  it("only says 'not reachable' when health was actually polled as unreachable", () => {
+    expect(describeFor("unreachable")).toBe("Registered · ✗ not reachable");
+  });
+
+  it("surfaces auth and degraded states distinctly", () => {
+    expect(describeFor("unauthorized")).toBe("Registered · auth required");
+    expect(describeFor("degraded")).toBe("Registered · degraded");
+    expect(describeFor("loading")).toBe("Registered · loading");
+  });
+
+  it("makes no reachability claim when the server has never been polled", () => {
+    expect(describeFor(undefined)).toBe("Registered · not in this scan");
+    // and the same when no health lookup is provided at all
+    expect(buildDiscoveredItems([], [offline])[0]!.description).toBe("Registered · not in this scan");
   });
 });
 

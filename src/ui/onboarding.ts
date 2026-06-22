@@ -24,7 +24,7 @@ import { Container, type SelectItem, SelectList, Text, matchesKey } from "@earen
 
 import type { BackendAdapter } from "../core/backend-adapter.ts";
 import { canIntrospect, canLoadUnload, canSwitch } from "../core/backend-adapter.ts";
-import type { CrossbarSettings, DiscoveredServer, LoadedState, ModelDescriptor, ServerRecord } from "../core/types.ts";
+import type { CrossbarSettings, DiscoveredServer, HealthState, LoadedState, ModelDescriptor, ServerRecord } from "../core/types.ts";
 import type { ServerRegistry } from "../registry/registry.ts";
 import { serverId } from "../registry/ids.ts";
 import { adapterFor } from "../adapters/index.ts";
@@ -67,20 +67,45 @@ function kindLabelOf(kind: string): string {
 }
 
 /**
+ * Describe a registered, enabled server that was NOT seen in the latest discovery
+ * scan. Absence from a scan is NOT evidence of unreachability (LAN discovery may be
+ * off, so the host was never probed). So we report the last polled health — the only
+ * signal backed by an actual probe — and only fall back to a scan-scope statement
+ * ("not in this scan") when no poll has run yet. Never claims "not reachable" on a hunch.
+ */
+function notInScanDescription(health: HealthState | undefined): string {
+  switch (health) {
+    case "healthy":
+      return "Registered · ✓ healthy";
+    case "loading":
+      return "Registered · loading";
+    case "degraded":
+      return "Registered · degraded";
+    case "unauthorized":
+      return "Registered · auth required";
+    case "unreachable":
+      return "Registered · ✗ not reachable";
+    default:
+      return "Registered · not in this scan"; // never polled — make no reachability claim
+  }
+}
+
+/**
  * Build a `SelectItem[]` representing the servers shown in the top-level onboarding
  * list.  Three kinds of entry can appear:
  *   - discovered servers (in discovery order) — already-registered ones get an
  *     "(added)" suffix so the user can tell new from known;
- *   - registered servers that are NOT currently discovered (e.g. offline), so they
- *     can still be managed/removed;
- *   - rescan and manual-add actions, always last.
+ *   - registered servers that are NOT currently discovered, labelled from their
+ *     polled health so they can still be managed/removed;
+ *   - rescan, settings, and manual-add actions, always last.
  *
- * Selecting any already-registered entry opens the manage overlay; selecting a new
- * discovered entry or the sentinel runs the add flow.
+ * `getHealth` (optional) supplies the last polled health per server id; when omitted,
+ * not-in-scan servers fall back to the neutral "not in this scan" description.
  */
 export function buildDiscoveredItems(
   discovered: DiscoveredServer[],
   existing: ServerRecord[],
+  getHealth?: (id: string) => HealthState | undefined,
 ): SelectItem[] {
   const existingById = new Map(existing.map((record) => [record.id, record]));
   const discoveredUrls = new Set(discovered.map((s) => s.baseUrl));
@@ -101,19 +126,20 @@ export function buildDiscoveredItems(
         ? saved.enabled
           ? "Already registered · ✓ healthy"
           : "Saved but disabled · server is reachable"
-        : `✓ healthy · auth: ${server.auth}${server.version ? ` · v${server.version}` : ""}`,
+        : `Discovered · not added · auth: ${server.auth}${server.version ? ` · v${server.version}` : ""}`,
     };
   });
 
-  // Append registered servers that weren't discovered this scan (offline,
-  // disabled, or not reachable right now) so they remain manageable.
+  // Append registered servers that weren't discovered this scan so they remain
+  // manageable. Enabled rows report polled health (honest about reachability);
+  // disabled rows make no health claim.
   for (const record of existing) {
     if (discoveredUrls.has(record.baseUrl)) continue;
     items.push({
       value: record.baseUrl,
       label: `${kindLabelOf(record.kind)} (${hostPortOf(record.baseUrl)})  (${record.enabled ? "added" : "disabled"})`,
       description: record.enabled
-        ? "Registered · not currently discovered"
+        ? notInScanDescription(getHealth?.(record.id))
         : "Saved but disabled · select to manage",
     });
   }
@@ -920,7 +946,7 @@ export async function openOnboarding(
   while (true) {
     const chosenBaseUrl = await selectServerOverlay(
       ctx,
-      buildDiscoveredItems(discovered, registry.list()),
+      buildDiscoveredItems(discovered, registry.list(), (id) => registry.getHealth(id)),
     );
 
     if (!chosenBaseUrl) return; // Esc at the server list closes Crossbar
