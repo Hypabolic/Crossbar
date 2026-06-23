@@ -428,6 +428,18 @@ describe("buildModelItems", () => {
     expect(items[0]!.description).toContain("embeddings");
   });
 
+  it("marks a loaded model with a ● label prefix and leading 'loaded' badge", () => {
+    const items = buildModelItems([makeModel({ id: "qwen", name: "Qwen", loaded: true })]);
+    expect(items[0]!.label).toBe("● Qwen");
+    expect(items[0]!.description?.startsWith("loaded")).toBe(true);
+  });
+
+  it("does not mark unloaded models", () => {
+    const items = buildModelItems([makeModel({ id: "qwen", name: "Qwen", loaded: false })]);
+    expect(items[0]!.label).toBe("Qwen");
+    expect(items[0]!.description ?? "").not.toContain("loaded");
+  });
+
   it("produces no description when context window is absent and no caps", () => {
     // Omit contextWindow entirely (exactOptionalPropertyTypes forbids passing undefined)
     const base = makeModel({ reasoning: false, tools: false, embeddings: false, input: ["text"] });

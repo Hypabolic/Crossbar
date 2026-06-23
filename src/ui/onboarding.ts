@@ -268,7 +268,8 @@ export function buildSettingsItems(settings: CrossbarSettings): SelectItem[] {
  * step of the onboarding flow.
  *
  * The description line surfaces the context window (when known) and any
- * capability badges (vision, tools, reasoning, embeddings).
+ * capability badges (vision, tools, reasoning, embeddings). A currently-loaded model
+ * (where the backend reports it) is marked with a leading ● and a "loaded" badge.
  */
 export function buildModelItems(models: ModelDescriptor[]): SelectItem[] {
   return models.map((m): SelectItem => {
@@ -289,10 +290,15 @@ export function buildModelItems(models: ModelDescriptor[]): SelectItem[] {
     if (m.embeddings) caps.push("embeddings");
     if (caps.length > 0) parts.push(caps.join(" · "));
 
+    // Surface which model the backend currently has resident, where it reports it
+    // (LM Studio's `state:"loaded"`). The ● matches the loaded-model widget; the
+    // "loaded" badge leads the description so it reads even without colour.
+    const name = m.name || m.id;
     const item: SelectItem = {
       value: m.id,
-      label: m.name || m.id,
+      label: m.loaded ? `● ${name}` : name,
     };
+    if (m.loaded) parts.unshift("loaded");
     if (parts.length > 0) {
       item.description = parts.join("  ");
     }
