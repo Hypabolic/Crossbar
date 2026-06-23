@@ -78,6 +78,19 @@ function parseRunningIds(json: unknown): string[] {
 
   const body = json as RunningBody;
 
+  // { running: [ { model | id, ... }, ... ] } — llama-swap's actual /running shape:
+  // a list of running upstreams, each an object carrying the model id.
+  if (Array.isArray(body.running)) {
+    return body.running.flatMap((item) => {
+      if (typeof item === "string") return [item];
+      if (item && typeof item === "object") {
+        const id = (item as RunningBody).model ?? (item as RunningBody).id;
+        return typeof id === "string" ? [id] : [];
+      }
+      return [];
+    });
+  }
+
   // { models: [...] }
   if (Array.isArray(body.models)) {
     return body.models.filter((m): m is string => typeof m === "string");

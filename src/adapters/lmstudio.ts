@@ -5,9 +5,11 @@
  * Uses the LM Studio-native REST API for discovery and management, and delegates
  * inference to the OpenAI-compatible /v1/* layer.
  *
- * LM Studio 0.4.0+ ships a native `/api/v1/*` REST API (recommended); the older
- * `/api/v0/*` API carries the same rich model fields and is kept as a fallback for
- * pre-0.4.0 servers. We prefer v1 and fall back to v0 only on a 404.
+ * LM Studio ships a native `/api/v1/*` REST API (recommended); the `/api/v0/*` API
+ * carries the same rich `{ data: [] }` model fields and is kept as a fallback. We prefer
+ * v1 but fall back to v0 whenever v1 isn't a recognised LM Studio body — not only on a 404:
+ * newer builds serve /api/v1/models (200) in a divergent `{ models: [] }` shape this adapter
+ * doesn't parse, while v0 still returns the flat fields we rely on. See `modelsResponse`.
  *
  * Key API endpoints:
  *   GET  /api/v1/models  (→ /api/v0/models fallback)  — model list with state, type, context length
