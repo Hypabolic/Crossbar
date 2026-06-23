@@ -165,13 +165,21 @@ class LmStudioAdapter implements BackendAdapter {
 
   /**
    * Fetch the native model list, preferring /api/v1/models and falling back to
-   * /api/v0/models for LM Studio < 0.4.0 (which only exposes the v0 REST API).
-   * Falls back ONLY on a 404 so auth (401) and unreachable (0) errors propagate.
+   * /api/v0/models when v1 isn't a recognised LM Studio body.
+   *
+   * The fallback triggers on more than a 404: newer LM Studio serves /api/v1/models
+   * with a different `{ models: [] }` shape (renamed fields: `key`, `loaded_instances`,
+   * `capabilities{}`) that our `{ data: [] }`-shaped parser doesn't understand — yet it
+   * still answers 200. The v0 endpoint coexists and carries the flat `data[]` fields the
+   * whole adapter is built around (`state`, `loaded_context_length`, `compatibility_type`),
+   * so we drop to it whenever v1 doesn't pass the discriminator. Auth (401) and unreachable
+   * (0) propagate untouched so they surface as real errors rather than a silent fallback.
    */
   private async modelsResponse(probe: Probe): Promise<ProbeResult> {
     const v1 = await probe(MODELS_V1);
-    if (v1.status === 404) return probe(MODELS_V0);
-    return v1;
+    if (v1.status === 401 || v1.status === 0) return v1;
+    if (v1.ok && hasLmsDiscriminator(v1.json)) return v1;
+    return probe(MODELS_V0);
   }
 
   // --- fingerprint ----------------------------------------------------------

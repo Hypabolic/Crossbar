@@ -155,6 +155,72 @@ const NEGATIVE_ROUTES: Record<string, ProbeResult> = {
   },
 };
 
+/**
+ * Newer LM Studio (the field-reported regression): /api/v1/models answers 200 with the
+ * divergent `{ models: [] }` shape our v0 parser doesn't understand, while /api/v0/models
+ * coexists and carries the rich `{ data: [] }` fields (incl. loaded_context_length: 60000).
+ * Crucially, /running ALSO 200s with LM Studio's catch-all error body — which previously
+ * tricked the llama-swap adapter. This server must resolve to `lmstudio` at 60k, not llama-swap.
+ */
+const NEW_V1_SHAPE: ProbeResult = {
+  status: 200,
+  ok: true,
+  headers: { "content-type": "application/json" },
+  json: {
+    models: [
+      { type: "llm", key: "qwen-9b", max_context_length: 262144, loaded_instances: [], capabilities: { trained_for_tool_use: true } },
+    ],
+  },
+};
+
+const V0_RICH: ProbeResult = {
+  status: 200,
+  ok: true,
+  headers: { "content-type": "application/json" },
+  json: {
+    data: [
+      {
+        id: "qwen-9b",
+        type: "vlm",
+        state: "loaded",
+        compatibility_type: "gguf",
+        max_context_length: 262144,
+        loaded_context_length: 60000,
+        quantization: "Q4_K_XL",
+        arch: "qwen35",
+      },
+      {
+        id: "nomic-embed",
+        type: "embeddings",
+        state: "not-loaded",
+        compatibility_type: "gguf",
+        max_context_length: 2048,
+        loaded_context_length: 0,
+        arch: "nomic-bert",
+      },
+    ],
+  },
+};
+
+/** LM Studio's catch-all 200 + JSON error, served on every unmapped path (incl. /running). */
+const LMS_CATCHALL_ERROR: ProbeResult = {
+  status: 200,
+  ok: true,
+  headers: { "content-type": "application/json" },
+  json: { error: "Unexpected endpoint or method. (GET /running)" },
+};
+
+/**
+ * newV1FallbackRoutes: models live on v0; v1 returns the unrecognised new shape; /running
+ * returns the LM Studio error sentinel. Exercises the v1→v0 fallback AND the llama-swap
+ * false-positive guard together.
+ */
+export const lmstudioNewV1Routes: Record<string, ProbeResult> = {
+  "/api/v1/models": NEW_V1_SHAPE,
+  "/api/v0/models": V0_RICH,
+  "/running": LMS_CATCHALL_ERROR,
+};
+
 /** authFailureRoutes: every path returns 401. */
 const AUTH_FAILURE_ROUTES: Record<string, ProbeResult> = {
   "/api/v1/models": UNAUTHORIZED,
