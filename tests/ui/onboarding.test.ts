@@ -300,6 +300,15 @@ describe("buildSettingsItems", () => {
     const items = buildSettingsItems({ autoRegisterLocalhost: false });
     expect(items[0]!.label).toBe("Auto-register localhost: OFF");
   });
+  it("omits the dismissed-servers row when nothing is dismissed", () => {
+    const items = buildSettingsItems({});
+    expect(items.map((i) => i.value)).not.toContain("edit-dismissed");
+  });
+  it("shows a dismissed-servers row with a count when present", () => {
+    const items = buildSettingsItems({ dismissed: ["http://127.0.0.1:11434"] });
+    const row = items.find((i) => i.value === "edit-dismissed");
+    expect(row?.label).toBe("Dismissed servers: 1");
+  });
 });
 
 describe("probePortDescription", () => {

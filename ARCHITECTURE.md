@@ -141,6 +141,12 @@ register(record):
   `CrossbarSettings` is **owned by `ServerRegistry`** (loaded from / persisted to `crossbar.json` on
   every mutation, so a server add/toggle never clobbers it) and editable from `/crossbar → ⚙ Discovery
   settings`. `discover()` reads `registry.getSettings()` at call time, so edits apply on the next scan.
+- **Dismissed servers:** at the no-chat-models dead-end (e.g. a reachable Ollama with only embedding
+  models — no chat models to add, and not in the registry to remove) the user picks one of two flavours.
+  *Hide for this session* is in-memory only (a `Set` in `openOnboarding`, not persisted) — the server
+  returns next launch. *Dismiss permanently* writes the normalised base URL to `CrossbarSettings.dismissed`;
+  `discover()` filters those out for **both** `/crossbar` and startup auto-register, so they stop
+  reappearing on every scan. Restore permanent dismissals under `⚙ Discovery settings → Dismissed servers`.
 - **Per origin:** run the probe-order fingerprint chain (CAPABILITY-MATRIX §"probe order"); pick the
   highest-confidence adapter; fall back to `openai-generic` when only `/v1/models` matches.
 - **Short timeouts** (e.g. 600ms) and bounded concurrency; a refused port returns `status:0` fast.

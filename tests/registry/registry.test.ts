@@ -377,3 +377,61 @@ describe("discovery settings", () => {
     expect(persisted.at(-1)?.settings).toEqual({ probePorts: [1234] });
   });
 });
+
+describe("dismissed servers", () => {
+  let store: FakeCredentialStore;
+  let registry: ServerRegistry;
+
+  beforeEach(() => {
+    store = new FakeCredentialStore();
+    registry = makeRegistry(store);
+  });
+
+  it("dismiss persists a normalised base URL and isDismissed reports it", async () => {
+    await registry.dismiss("http://127.0.0.1:11434");
+    expect(registry.isDismissed("http://127.0.0.1:11434")).toBe(true);
+    expect(persisted.at(-1)?.settings).toEqual({ dismissed: ["http://127.0.0.1:11434"] });
+  });
+
+  it("isDismissed matches regardless of case and trailing slash", async () => {
+    await registry.dismiss("http://127.0.0.1:11434/");
+    expect(registry.isDismissed("HTTP://127.0.0.1:11434")).toBe(true);
+    expect(registry.dismissedList()).toEqual(["http://127.0.0.1:11434"]);
+  });
+
+  it("dismiss is idempotent (no duplicate entries)", async () => {
+    await registry.dismiss("http://127.0.0.1:11434");
+    await registry.dismiss("http://127.0.0.1:11434/");
+    expect(registry.dismissedList()).toEqual(["http://127.0.0.1:11434"]);
+  });
+
+  it("undismiss removes the entry and clears the field when empty", async () => {
+    await registry.dismiss("http://127.0.0.1:11434");
+    await registry.undismiss("http://127.0.0.1:11434");
+    expect(registry.isDismissed("http://127.0.0.1:11434")).toBe(false);
+    // The whole settings block normalises away once the last field is gone.
+    expect(persisted.at(-1)?.settings).toBeUndefined();
+  });
+
+  it("dismiss preserves existing discovery settings", async () => {
+    registry.load({ version: 1, servers: [], settings: { lanDiscovery: true } });
+    await registry.dismiss("http://127.0.0.1:11434");
+    expect(persisted.at(-1)?.settings).toEqual({
+      lanDiscovery: true,
+      dismissed: ["http://127.0.0.1:11434"],
+    });
+  });
+
+  it("undismiss keeps other settings and other dismissed entries", async () => {
+    registry.load({
+      version: 1,
+      servers: [],
+      settings: { lanDiscovery: true, dismissed: ["http://a:1", "http://b:2"] },
+    });
+    await registry.undismiss("http://a:1");
+    expect(persisted.at(-1)?.settings).toEqual({
+      lanDiscovery: true,
+      dismissed: ["http://b:2"],
+    });
+  });
+});

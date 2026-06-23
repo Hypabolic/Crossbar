@@ -73,9 +73,15 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
     const ports =
       settings?.probePorts && settings.probePorts.length > 0 ? settings.probePorts : undefined;
 
+    // Hide servers the user has dismissed (e.g. a reachable Ollama with only
+    // embedding models) from every consumer — both /crossbar and auto-register.
+    const reg = registry;
+    const keep = (list: DiscoveredServer[]): DiscoveredServer[] =>
+      reg ? list.filter((s) => !reg.isDismissed(s.baseUrl)) : list;
+
     const local = await discoverLocalhost(adapters, ports ? { ports } : undefined);
     if (opts?.includeLan === false || !settings?.lanDiscovery) {
-      return local;
+      return keep(local);
     }
 
     // Explicit hosts/CIDRs win; otherwise auto-scan the local subnet(s).
@@ -97,7 +103,7 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
       livenessFirst: true,
     });
     const seen = new Set(local.map((s) => s.baseUrl));
-    return [...local, ...lan.filter((s) => !seen.has(s.baseUrl))];
+    return keep([...local, ...lan.filter((s) => !seen.has(s.baseUrl))]);
   };
 
   /** Best-effort: refresh a server's model list and (re)register it with Pi. Returns models used. */

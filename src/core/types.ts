@@ -163,6 +163,14 @@ export interface CrossbarSettings {
    * via `/crossbar`. Set false to require every server to be added by hand.
    */
   autoRegisterLocalhost?: boolean;
+  /**
+   * Base URLs the user has explicitly dismissed from discovery (normalised:
+   * lowercase, no trailing slash). Dismissed servers are hidden from scans and
+   * never auto-registered until restored via Discovery settings. Used to hide
+   * reachable backends that have nothing usable — e.g. an Ollama with only
+   * embedding models — which would otherwise reappear on every scan.
+   */
+  dismissed?: string[];
 }
 
 export interface CrossbarConfigFile {

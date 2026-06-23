@@ -73,6 +73,49 @@ export class ServerRegistry {
   }
 
   // ---------------------------------------------------------------------------
+  // Dismissed discovered servers (persisted; keyed by normalised base URL)
+  // ---------------------------------------------------------------------------
+
+  /** Normalise a base URL for dismiss comparisons (lowercase, no trailing slash). */
+  private static normalizeUrl(baseUrl: string): string {
+    return baseUrl.trim().toLowerCase().replace(/\/+$/, "");
+  }
+
+  /** True when the given discovered base URL has been dismissed by the user. */
+  isDismissed(baseUrl: string): boolean {
+    const dismissed = this.settings?.dismissed;
+    if (!dismissed || dismissed.length === 0) return false;
+    return dismissed.includes(ServerRegistry.normalizeUrl(baseUrl));
+  }
+
+  /** Base URLs the user has dismissed from discovery. */
+  dismissedList(): string[] {
+    return this.settings?.dismissed ? [...this.settings.dismissed] : [];
+  }
+
+  /** Hide a discovered server from future scans until restored. */
+  async dismiss(baseUrl: string): Promise<void> {
+    const url = ServerRegistry.normalizeUrl(baseUrl);
+    const current = this.settings?.dismissed ?? [];
+    if (current.includes(url)) return;
+    this.settings = { ...(this.settings ?? {}), dismissed: [...current, url] };
+    await this.flush();
+  }
+
+  /** Restore a previously-dismissed server so it appears in scans again. */
+  async undismiss(baseUrl: string): Promise<void> {
+    const url = ServerRegistry.normalizeUrl(baseUrl);
+    const current = this.settings?.dismissed ?? [];
+    if (!current.includes(url)) return;
+    const remaining = current.filter((u) => u !== url);
+    const next: CrossbarSettings = { ...(this.settings ?? {}) };
+    if (remaining.length > 0) next.dismissed = remaining;
+    else delete next.dismissed;
+    this.settings = Object.keys(next).length > 0 ? next : undefined;
+    await this.flush();
+  }
+
+  // ---------------------------------------------------------------------------
   // Read
   // ---------------------------------------------------------------------------
 

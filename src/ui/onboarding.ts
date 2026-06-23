@@ -219,6 +219,7 @@ function cleanSettings(settings: CrossbarSettings): CrossbarSettings {
   if (settings.probePorts && settings.probePorts.length > 0) out.probePorts = settings.probePorts;
   // Persist only the non-default (false); auto-register defaults to on.
   if (settings.autoRegisterLocalhost === false) out.autoRegisterLocalhost = false;
+  if (settings.dismissed && settings.dismissed.length > 0) out.dismissed = settings.dismissed;
   return out;
 }
 
@@ -251,6 +252,13 @@ export function buildSettingsItems(settings: CrossbarSettings): SelectItem[] {
       label: `Probe ports: ${ports.length > 0 ? ports.join(", ") : "defaults"}`,
       description: "Ports scanned on each host (blank = per-backend defaults)",
     },
+    ...(settings.dismissed && settings.dismissed.length > 0
+      ? [{
+        value: "edit-dismissed",
+        label: `Dismissed servers: ${settings.dismissed.length}`,
+        description: "Restore servers you hid from discovery",
+      }]
+      : []),
     { value: "back", label: "← Back to servers", description: "Return to the server list" },
   ];
 }
@@ -921,6 +929,45 @@ async function openSettings(
     } else if (choice === "edit-ports") {
       await openProbePorts(ctx, registry);
       // settings loop will re-read and re-render the (possibly updated) menu
+    } else if (choice === "edit-dismissed") {
+      await openDismissed(ctx, registry);
+      // settings loop will re-read and re-render the (possibly updated) menu
+    }
+  }
+}
+
+/**
+ * Managed list UI for dismissed servers: list each hidden base URL, select one to
+ * restore it (it reappears on the next scan). Loops until Back/Esc; re-reads the
+ * registry each pass. Returns early when nothing is dismissed.
+ */
+async function openDismissed(ctx: ExtensionCommandContext, registry: ServerRegistry): Promise<void> {
+  while (true) {
+    const dismissed = registry.dismissedList();
+    if (dismissed.length === 0) {
+      ctx.ui.notify("Crossbar: no dismissed servers.", "info");
+      return;
+    }
+
+    const items: SelectItem[] = dismissed.map((url) => ({
+      value: `url:${url}`,
+      label: hostPortOf(url),
+      description: "Select to restore — it reappears on the next scan",
+    }));
+    items.push({ value: "back", label: "← Back", description: "Return to discovery settings" });
+
+    const choice = await selectOverlay(
+      ctx,
+      "Dismissed servers",
+      items,
+      "Enter to restore · Esc back",
+    );
+    if (!choice || choice === "back") return;
+
+    if (choice.startsWith("url:")) {
+      const url = choice.slice(4);
+      await registry.undismiss(url);
+      ctx.ui.notify(`Crossbar: restored ${hostPortOf(url)} — rescan to see it.`, "info");
     }
   }
 }
@@ -1105,6 +1152,9 @@ export async function openOnboarding(
   // /crossbar must NOT trigger a fresh scan. The "⟳ Rescan" action re-scans on demand
   // (and that's where the LAN sweep happens).
   let discovered: DiscoveredServer[] = deps.initialDiscovered ?? [];
+  // Servers hidden for THIS session only (not persisted): they reappear next launch.
+  // Permanent dismissals go to registry.dismiss() and are filtered inside discover().
+  const sessionHidden = new Set<string>();
   const rescan = async (): Promise<void> => {
     ctx.ui.notify("Crossbar: scanning for backends…", "info");
     try {
@@ -1115,9 +1165,10 @@ export async function openOnboarding(
   };
 
   while (true) {
+    const visible = discovered.filter((s) => !sessionHidden.has(s.baseUrl));
     const chosenBaseUrl = await selectServerOverlay(
       ctx,
-      buildDiscoveredItems(discovered, registry.list(), (id) => registry.getHealth(id)),
+      buildDiscoveredItems(visible, registry.list(), (id) => registry.getHealth(id)),
     );
 
     if (!chosenBaseUrl) return; // Esc at the server list closes Crossbar
@@ -1244,7 +1295,32 @@ export async function openOnboarding(
 
     const selectableModels = chatModels(models);
     if (selectableModels.length === 0) {
-      ctx.ui.notify("Crossbar: server returned no chat models.", "warning");
+      // A reachable server with nothing usable is a dead end: it can't be added
+      // (no chat models) and isn't in the registry to remove. Offer to dismiss it
+      // so it stops reappearing on every scan. Name the reason when we can.
+      const onlyEmbeddings = models.length > 0 && models.every((m) => m.embeddings);
+      const reason = onlyEmbeddings
+        ? `${discoveredServer.label} has only embedding models — nothing to use in chat.`
+        : `${discoveredServer.label} returned no chat models.`;
+      // Two flavours of "make it go away": hide for now (returns next launch) vs
+      // dismiss permanently (persisted, filtered from every scan until restored).
+      const HIDE_ONCE = "Hide for this session";
+      const DISMISS_FOREVER = "Dismiss permanently";
+      const choice = await ctx.ui.select(reason, ["Back", HIDE_ONCE, DISMISS_FOREVER]);
+      if (choice === HIDE_ONCE) {
+        sessionHidden.add(targetBaseUrl);
+        ctx.ui.notify(
+          `Crossbar: hid ${discoveredServer.label} for now — it returns next time you open Crossbar.`,
+          "info",
+        );
+      } else if (choice === DISMISS_FOREVER) {
+        await registry.dismiss(targetBaseUrl);
+        discovered = discovered.filter((s) => s.baseUrl !== targetBaseUrl);
+        ctx.ui.notify(
+          `Crossbar: dismissed ${discoveredServer.label} — restore it under ⚙ Discovery settings.`,
+          "info",
+        );
+      }
       continue;
     }
 
