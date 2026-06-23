@@ -1,17 +1,15 @@
 /**
  * Health-poll orchestration.
  *
- * Each tick, for every enabled server: probe `health`, refresh the model list, and
- * re-register with Pi only when the model set actually changed. Results are written
- * to the registry's ephemeral cache (`setHealth`, `updateHealthCache`) so the loaded
- * widget can render live health + a fresh model list without doing its own I/O for
- * those fields.
+ * Each tick, for every enabled server: probe `health` (and, only for backends without a
+ * health endpoint, a single `listModels` as the reachability signal). The model catalogue
+ * is NOT re-listed here — it is refreshed only when needed (startup, /crossbar Rescan, and
+ * manage actions), so a backgrounded session never polls the backend for models. Results
+ * are written to the registry's ephemeral cache (`setHealth`, `updateHealthCache`).
  *
  * Pure orchestration over injected collaborators (registry + adapters + the shim);
  * never calls `fetch` directly — only the adapter via the injected `Probe`.
  */
-
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { adapterFor } from "./adapters/index.ts";
 import { supports } from "./core/backend-adapter.ts";
@@ -19,7 +17,6 @@ import { Capability } from "./core/capability.ts";
 import type { DiscoveredServer, HealthState, ModelDescriptor, ServerRecord } from "./core/types.ts";
 import { createProbe } from "./discovery/probe.ts";
 import type { ServerRegistry } from "./registry/registry.ts";
-import { reRegisterServer } from "./shim/provider-shim.ts";
 
 /** Reconstruct a minimal DiscoveredServer from a persisted record for adapter calls. */
 function serverOf(record: ServerRecord): DiscoveredServer {
@@ -81,13 +78,12 @@ export function catalogueChanged(
 }
 
 /**
- * Poll a single server: refresh health + models, re-register on change, and write
- * the results to the registry cache. Returns the observed health state. The health
- * and model probes are caught and reported as `unreachable`; `pollAll` additionally
+ * Poll a single server: probe health (or one reachability listModels for health-less
+ * backends) and write the result to the registry cache. Returns the observed health
+ * state. Probes are caught and reported as `unreachable`; `pollAll` additionally
  * isolates any per-server rejection so one bad server never aborts the tick.
  */
 export async function pollServer(
-  pi: ExtensionAPI,
   registry: ServerRegistry,
   record: ServerRecord,
 ): Promise<HealthState> {
@@ -107,19 +103,21 @@ export async function pollServer(
     }
   }
 
-  // 2) Refresh the model list; persist + re-register only when the catalogue
-  //    changed in a registration-relevant way. For backends without a health
-  //    endpoint, listModels success/failure infers reachability.
-  try {
-    const models = await adapter.listModels(server, cred, probe);
-    if (catalogueChanged(record.lastKnownModels, models)) {
-      await registry.setLastKnownModels(record.id, models);
-      await reRegisterServer(pi, registry, record, models);
+  // 2) The periodic poll no longer re-lists the model catalogue — that is refreshed
+  //    only when needed (startup, /crossbar Rescan, manage actions), not on a timer,
+  //    so a backgrounded session stays silent. Backends WITHOUT a health endpoint have
+  //    no other reachability signal, so for those we still do one cheap listModels and
+  //    infer reachability from it (but never re-register from the periodic path).
+  if (!hasHealth) {
+    try {
+      await adapter.listModels(server, cred, probe);
+      health = "healthy";
+    } catch {
+      health = "unreachable";
     }
+  }
+  if (health !== "unreachable") {
     registry.updateHealthCache(record.id, { lastSeenAt: Date.now() });
-    if (!hasHealth) health = "healthy";
-  } catch {
-    if (!hasHealth) health = "unreachable";
   }
 
   registry.setHealth(record.id, health);
@@ -127,7 +125,7 @@ export async function pollServer(
 }
 
 /** Poll every enabled server concurrently; failures are isolated per server. */
-export async function pollAll(pi: ExtensionAPI, registry: ServerRegistry): Promise<void> {
+export async function pollAll(registry: ServerRegistry): Promise<void> {
   const records = registry.list().filter((r) => r.enabled);
-  await Promise.allSettled(records.map((r) => pollServer(pi, registry, r)));
+  await Promise.allSettled(records.map((r) => pollServer(registry, r)));
 }

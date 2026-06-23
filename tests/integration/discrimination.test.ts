@@ -15,7 +15,7 @@ import { createFakeProbe } from "../conformance/fake-probe.ts";
 import type { RouteMap } from "../conformance/fake-probe.ts";
 
 import { ollamaFixture } from "../adapters/ollama.fixture.ts";
-import { lmstudioFixture } from "../adapters/lmstudio.fixture.ts";
+import { lmstudioFixture, lmstudioNewV1Routes } from "../adapters/lmstudio.fixture.ts";
 import { vllmFixture } from "../adapters/vllm.fixture.ts";
 import { llamacppFixture } from "../adapters/llamacpp.fixture.ts";
 import { llamaswapFixture } from "../adapters/llamaswap.fixture.ts";
@@ -83,6 +83,31 @@ describe("[integration] cross-adapter discrimination", () => {
       // And the expected backend must be among them.
       expect(matches, `${name} not detected by its own adapter`).toContain(kind);
     }
+  });
+
+  it("newer LM Studio (v1 {models:[]} + /running error) resolves to lmstudio, not llama-swap", async () => {
+    // Regression: this LM Studio version serves /api/v1/models in a shape our v0 parser
+    // can't read, AND 200s with a JSON error on /running — which used to make llama-swap
+    // false-positive and win. The lmstudio adapter must fall back to v0 and claim the origin.
+    const probe = createFakeProbe(lmstudioNewV1Routes as RouteMap);
+    const winner = await probeOrigin("http://172.19.96.1:1234", [...DISCOVERY_ADAPTERS], 600, () => probe);
+    expect(winner).not.toBeNull();
+    expect(winner!.kind).toBe("lmstudio");
+  });
+
+  it("the v0 fallback surfaces the real loaded context window (not the 8k default)", async () => {
+    const probe = createFakeProbe(lmstudioNewV1Routes as RouteMap);
+    const server = await probeOrigin("http://172.19.96.1:1234", [...DISCOVERY_ADAPTERS], 600, () => probe);
+    const models = await lmstudioFixture.adapter.listModels(server!, { mode: "none" }, probe);
+    const loaded = models.find((m) => m.id === "qwen-9b");
+    expect(loaded?.contextWindow).toBe(60000);
+  });
+
+  it("llama-swap is NOT detected on the LM Studio /running error body", async () => {
+    const probe = createFakeProbe(lmstudioNewV1Routes as RouteMap);
+    const swap = DISCOVERY_ADAPTERS.find((a) => a.kind === "llamaswap")!;
+    const r = await swap.fingerprint("http://172.19.96.1:1234", probe);
+    expect(r).toBeNull();
   });
 
   it("generic never outranks a specific adapter at the same origin", async () => {

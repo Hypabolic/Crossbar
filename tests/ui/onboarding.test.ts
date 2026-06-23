@@ -300,6 +300,15 @@ describe("buildSettingsItems", () => {
     const items = buildSettingsItems({ autoRegisterLocalhost: false });
     expect(items[0]!.label).toBe("Auto-register localhost: OFF");
   });
+  it("omits the dismissed-servers row when nothing is dismissed", () => {
+    const items = buildSettingsItems({});
+    expect(items.map((i) => i.value)).not.toContain("edit-dismissed");
+  });
+  it("shows a dismissed-servers row with a count when present", () => {
+    const items = buildSettingsItems({ dismissed: ["http://127.0.0.1:11434"] });
+    const row = items.find((i) => i.value === "edit-dismissed");
+    expect(row?.label).toBe("Dismissed servers: 1");
+  });
 });
 
 describe("probePortDescription", () => {
@@ -417,6 +426,18 @@ describe("buildModelItems", () => {
   it("includes embeddings badge when set", () => {
     const items = buildModelItems([makeModel({ embeddings: true })]);
     expect(items[0]!.description).toContain("embeddings");
+  });
+
+  it("marks a loaded model with a ● label prefix and leading 'loaded' badge", () => {
+    const items = buildModelItems([makeModel({ id: "qwen", name: "Qwen", loaded: true })]);
+    expect(items[0]!.label).toBe("● Qwen");
+    expect(items[0]!.description?.startsWith("loaded")).toBe(true);
+  });
+
+  it("does not mark unloaded models", () => {
+    const items = buildModelItems([makeModel({ id: "qwen", name: "Qwen", loaded: false })]);
+    expect(items[0]!.label).toBe("Qwen");
+    expect(items[0]!.description ?? "").not.toContain("loaded");
   });
 
   it("produces no description when context window is absent and no caps", () => {

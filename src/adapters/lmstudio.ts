@@ -5,9 +5,11 @@
  * Uses the LM Studio-native REST API for discovery and management, and delegates
  * inference to the OpenAI-compatible /v1/* layer.
  *
- * LM Studio 0.4.0+ ships a native `/api/v1/*` REST API (recommended); the older
- * `/api/v0/*` API carries the same rich model fields and is kept as a fallback for
- * pre-0.4.0 servers. We prefer v1 and fall back to v0 only on a 404.
+ * LM Studio ships a native `/api/v1/*` REST API (recommended); the `/api/v0/*` API
+ * carries the same rich `{ data: [] }` model fields and is kept as a fallback. We prefer
+ * v1 but fall back to v0 whenever v1 isn't a recognised LM Studio body — not only on a 404:
+ * newer builds serve /api/v1/models (200) in a divergent `{ models: [] }` shape this adapter
+ * doesn't parse, while v0 still returns the flat fields we rely on. See `modelsResponse`.
  *
  * Key API endpoints:
  *   GET  /api/v1/models  (→ /api/v0/models fallback)  — model list with state, type, context length
@@ -165,19 +167,48 @@ class LmStudioAdapter implements BackendAdapter {
 
   /**
    * Fetch the native model list, preferring /api/v1/models and falling back to
-   * /api/v0/models for LM Studio < 0.4.0 (which only exposes the v0 REST API).
-   * Falls back ONLY on a 404 so auth (401) and unreachable (0) errors propagate.
+   * /api/v0/models when v1 isn't a recognised LM Studio body.
+   *
+   * The fallback triggers on more than a 404: newer LM Studio serves /api/v1/models
+   * with a different `{ models: [] }` shape (renamed fields: `key`, `loaded_instances`,
+   * `capabilities{}`) that our `{ data: [] }`-shaped parser doesn't understand — yet it
+   * still answers 200. The v0 endpoint coexists and carries the flat `data[]` fields the
+   * whole adapter is built around (`state`, `loaded_context_length`, `compatibility_type`),
+   * so we drop to it whenever v1 doesn't pass the discriminator. Auth (401) and unreachable
+   * (0) propagate untouched so they surface as real errors rather than a silent fallback.
    */
-  private async modelsResponse(probe: Probe): Promise<ProbeResult> {
+  /**
+   * Origins we've already learned serve the unrecognised v1 shape, so subsequent calls
+   * go straight to v0 instead of re-probing v1 every time. Without this, the periodic
+   * poll fires both endpoints on every tick. Keyed by base URL; a process restart clears
+   * it, so it self-heals if a server's API shape changes.
+   */
+  private readonly v0Origins = new Set<string>();
+
+  /** Normalise an origin for the v0 memo (lowercase, no trailing slash) so the same
+   *  server reached via cosmetically-different URLs shares one memo entry. */
+  private static memoKey(baseUrl: string): string {
+    return baseUrl.trim().toLowerCase().replace(/\/+$/, "");
+  }
+
+  private async modelsResponse(probe: Probe, originKey: string): Promise<ProbeResult> {
+    const key = LmStudioAdapter.memoKey(originKey);
+    if (this.v0Origins.has(key)) return probe(MODELS_V0);
     const v1 = await probe(MODELS_V1);
-    if (v1.status === 404) return probe(MODELS_V0);
-    return v1;
+    if (v1.status === 401 || v1.status === 0) return v1;
+    if (v1.ok && hasLmsDiscriminator(v1.json)) return v1;
+    // v1 isn't a recognised LM Studio body — fall back to v0. Memoize the v0 preference
+    // ONLY once v0 actually validates, so a transient v1 error (500/429/malformed) can't
+    // pin the origin to v0 until reload; an unrecognised-but-recovering v1 keeps retrying.
+    const v0 = await probe(MODELS_V0);
+    if (v0.ok && hasLmsDiscriminator(v0.json)) this.v0Origins.add(key);
+    return v0;
   }
 
   // --- fingerprint ----------------------------------------------------------
 
   async fingerprint(baseUrl: string, probe: Probe): Promise<DiscoveredServer | null> {
-    const r = await this.modelsResponse(probe);
+    const r = await this.modelsResponse(probe, baseUrl);
     if (!r.ok || r.status === 0) return null;
     if (!hasLmsDiscriminator(r.json)) return null;
 
@@ -193,11 +224,11 @@ class LmStudioAdapter implements BackendAdapter {
   // --- health ---------------------------------------------------------------
 
   async health(
-    _server: DiscoveredServer,
+    server: DiscoveredServer,
     _cred: ServerCredential,
     probe: Probe,
   ): Promise<HealthStatus> {
-    const r = await this.modelsResponse(probe);
+    const r = await this.modelsResponse(probe, server.baseUrl);
     if (r.status === 0) return { state: "unreachable" };
     if (r.status === 401) return { state: "unauthorized" };
     if (!r.ok) return { state: "degraded" };
@@ -209,11 +240,11 @@ class LmStudioAdapter implements BackendAdapter {
   // --- listModels -----------------------------------------------------------
 
   async listModels(
-    _server: DiscoveredServer,
+    server: DiscoveredServer,
     _cred: ServerCredential,
     probe: Probe,
   ): Promise<ModelDescriptor[]> {
-    const r = await this.modelsResponse(probe);
+    const r = await this.modelsResponse(probe, server.baseUrl);
     if (!r.ok) {
       if (r.status === 401) throw new Error("401 Unauthorized");
       if (r.status === 0) throw new Error("listModels failed: server unreachable");
@@ -227,11 +258,11 @@ class LmStudioAdapter implements BackendAdapter {
   // --- introspectLoaded -----------------------------------------------------
 
   async introspectLoaded(
-    _server: DiscoveredServer,
+    server: DiscoveredServer,
     _cred: ServerCredential,
     probe: Probe,
   ): Promise<LoadedState> {
-    const r = await this.modelsResponse(probe);
+    const r = await this.modelsResponse(probe, server.baseUrl);
     if (!r.ok) {
       if (r.status === 401) throw new Error("401 Unauthorized");
       if (r.status === 0) throw new Error("introspectLoaded failed: server unreachable");
@@ -258,7 +289,7 @@ class LmStudioAdapter implements BackendAdapter {
   // --- switchModel ----------------------------------------------------------
 
   async switchModel(
-    _server: DiscoveredServer,
+    server: DiscoveredServer,
     _cred: ServerCredential,
     modelId: string,
     probe: Probe,
@@ -276,7 +307,7 @@ class LmStudioAdapter implements BackendAdapter {
     }
 
     // Step 2: Confirm via model list that the target is now loaded
-    const r2 = await this.modelsResponse(probe);
+    const r2 = await this.modelsResponse(probe, server.baseUrl);
     if (!r2.ok) {
       if (r2.status === 0) throw new Error("switchModel confirmation failed: server went down");
       if (r2.status === 401) throw new Error("401 Unauthorized");

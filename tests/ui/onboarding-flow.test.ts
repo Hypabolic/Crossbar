@@ -292,6 +292,44 @@ describe("openOnboarding navigation and registration", () => {
     expect(custom).toHaveBeenCalledTimes(2);
   });
 
+  it("permanently dismisses an embedding-only server at the dead-end", async () => {
+    adapterMocks.listModels.mockResolvedValue([
+      { ...model, id: "embedding-model", embeddings: true },
+    ]);
+    const registry = makeRegistry();
+    const dismissSpy = vi.spyOn(registry, "dismiss");
+    const { pi, ctx } = makeHarness([
+      server.baseUrl, // select the discovered embedding-only server
+      null, // server selector closes after dismiss
+    ]);
+    // At the no-chat-models prompt, choose "Dismiss permanently".
+    (ctx.ui.select as ReturnType<typeof vi.fn>).mockResolvedValueOnce("Dismiss permanently");
+
+    await openOnboarding(pi, ctx, { registry, discover: async () => [server], initialDiscovered: [server] });
+
+    expect(dismissSpy).toHaveBeenCalledWith(server.baseUrl);
+    expect(registry.isDismissed(server.baseUrl)).toBe(true);
+  });
+
+  it("hides an embedding-only server for the session only (not persisted)", async () => {
+    adapterMocks.listModels.mockResolvedValue([
+      { ...model, id: "embedding-model", embeddings: true },
+    ]);
+    const registry = makeRegistry();
+    const dismissSpy = vi.spyOn(registry, "dismiss");
+    const { pi, ctx } = makeHarness([
+      server.baseUrl, // select → dead-end → "Hide for this session"
+      null, // server selector closes
+    ]);
+    (ctx.ui.select as ReturnType<typeof vi.fn>).mockResolvedValueOnce("Hide for this session");
+
+    await openOnboarding(pi, ctx, { registry, discover: async () => [server], initialDiscovered: [server] });
+
+    // Session-only: nothing persisted, no permanent dismissal.
+    expect(dismissSpy).not.toHaveBeenCalled();
+    expect(registry.isDismissed(server.baseUrl)).toBe(false);
+  });
+
   it("manages probe ports via overlay (remove one port from custom list)", async () => {
     const registry = makeRegistry();
     // Seed a custom override (setSettings is public and uses the mock persist).

@@ -23,7 +23,7 @@ loaded-model widget ────────────────────
 ```
 src/
   index.ts                  # extension entry: /crossbar + /local, session_start/shutdown, health poll
-  poll.ts                   # per-tick health() + model refresh + re-register-on-change orchestration
+  poll.ts                   # per-tick health() reachability orchestration (runs only while /crossbar open)
   core/                     # FROZEN CONTRACT — do not change without bumping CONTRACT_VERSION
     capability.ts           # Capability enum, AuthMode, BackendKind
     types.ts                # Probe, DiscoveredServer, ModelDescriptor, LoadedState, ServerRecord, PiModelEntry
@@ -105,12 +105,14 @@ register(record):
 - **Secrets:** `ctx.modelRegistry.authStorage` (`auth.json`, `0600`), keyed by `record.id`.
 - **IDs:** stable, derived from `kind + host + port` (e.g. `crossbar-ollama-localhost-11434`) so a server
   keeps its id and key across restarts. (`registry/ids.ts`)
-- **Health poll (`poll.ts`):** interval loop started in `session_start` (UI sessions only, so a
-  long-lived timer never keeps a one-shot/headless run alive), stopped in `session_shutdown`. Each tick
-  per enabled server: call `adapter.health()` and record the state (`registry.setHealth`), refresh the
-  model list, and **re-register only when the model set changed** (`reRegisterServer`). The loaded widget
-  persists each live introspection into the cache so the `last-known` fallback has data when a server
-  drops offline, and renders a degraded/unreachable/auth indicator from the polled health.
+- **Health poll (`poll.ts`):** interval loop that runs **only while the `/crossbar` overlay is open**
+  (started in `openCmd`, stopped in a `finally`; also cleared in `session_shutdown`) — a backgrounded
+  session never touches the backend. Each tick per enabled server calls `adapter.health()` and records the
+  state (`registry.setHealth`); backends without a health endpoint do one `listModels` purely as a
+  reachability signal. The poll does **not** refresh the model catalogue — that happens only when needed
+  (startup, `/crossbar` Rescan/add, and manage actions, via `refreshAndRegister`), so it is never on a
+  timer. The loaded widget independently introspects loaded state (its own `introspectLoaded`) and renders
+  a degraded/unreachable/auth indicator from the polled health.
 - **Two-phase startup:** async factory (`src/index.ts`) calls `preloadCachedProviders` first (before
   Pi resolves any models) to register enabled servers that have a `lastKnownModels` cache using the
   pure `buildProviderConfig` path (`registerCachedServer`). No network, no UI, no timers, never throws.
@@ -141,6 +143,12 @@ register(record):
   `CrossbarSettings` is **owned by `ServerRegistry`** (loaded from / persisted to `crossbar.json` on
   every mutation, so a server add/toggle never clobbers it) and editable from `/crossbar → ⚙ Discovery
   settings`. `discover()` reads `registry.getSettings()` at call time, so edits apply on the next scan.
+- **Dismissed servers:** at the no-chat-models dead-end (e.g. a reachable Ollama with only embedding
+  models — no chat models to add, and not in the registry to remove) the user picks one of two flavours.
+  *Hide for this session* is in-memory only (a `Set` in `openOnboarding`, not persisted) — the server
+  returns next launch. *Dismiss permanently* writes the normalised base URL to `CrossbarSettings.dismissed`;
+  `discover()` filters those out for **both** `/crossbar` and startup auto-register, so they stop
+  reappearing on every scan. Restore permanent dismissals under `⚙ Discovery settings → Dismissed servers`.
 - **Per origin:** run the probe-order fingerprint chain (CAPABILITY-MATRIX §"probe order"); pick the
   highest-confidence adapter; fall back to `openai-generic` when only `/v1/models` matches.
 - **Short timeouts** (e.g. 600ms) and bounded concurrency; a refused port returns `status:0` fast.

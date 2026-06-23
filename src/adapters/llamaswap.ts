@@ -44,6 +44,22 @@ interface V1ModelsBody {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * True when a parsed /running body matches a llama-swap shape — an array of upstreams,
+ * or an object carrying one of llama-swap's keys. This positively distinguishes it from
+ * LM Studio, whose catch-all 200 response is `{ "error": "Unexpected endpoint..." }` (no
+ * such key). Matches every shape {@link parseRunningIds} understands, so it never rejects
+ * a real llama-swap server.
+ */
+function looksLikeRunning(json: unknown): boolean {
+  if (Array.isArray(json)) return true;
+  if (json === null || typeof json !== "object") return false;
+  const o = json as Record<string, unknown>;
+  // LM Studio's error sentinel — explicit reject.
+  if ("error" in o) return false;
+  return "running" in o || "models" in o || "id" in o || "model" in o;
+}
+
 /** Extract running model ids from a /running response (handles various shapes). */
 function parseRunningIds(json: unknown): string[] {
   if (!json || typeof json !== "object") return [];
@@ -61,6 +77,19 @@ function parseRunningIds(json: unknown): string[] {
   }
 
   const body = json as RunningBody;
+
+  // { running: [ { model | id, ... }, ... ] } — llama-swap's actual /running shape:
+  // a list of running upstreams, each an object carrying the model id.
+  if (Array.isArray(body.running)) {
+    return body.running.flatMap((item) => {
+      if (typeof item === "string") return [item];
+      if (item && typeof item === "object") {
+        const id = (item as RunningBody).model ?? (item as RunningBody).id;
+        return typeof id === "string" ? [id] : [];
+      }
+      return [];
+    });
+  }
 
   // { models: [...] }
   if (Array.isArray(body.models)) {
@@ -100,15 +129,21 @@ class LlamaswapAdapter implements BackendAdapter {
     // /running is a llama-swap-only path — not present on bare llama-server.
     const r = await probe("/running");
     if (!r.ok) return null;
-    // Must parse as JSON (llama-swap returns JSON from /running, not plain text)
-    if (r.json === undefined && r.text !== undefined) {
-      // If text is not JSON, bail
+
+    // A bare 200-with-JSON is NOT enough: LM Studio answers 200 + a JSON error body
+    // (`{"error":"Unexpected endpoint or method. (GET /running)"}`) on EVERY unknown
+    // path, which used to false-positive here and mask the real LM Studio backend.
+    // Require the body to actually look like llama-swap's /running shape.
+    let body: unknown = r.json;
+    if (body === undefined && r.text !== undefined) {
       try {
-        JSON.parse(r.text);
+        body = JSON.parse(r.text);
       } catch {
         return null;
       }
     }
+    if (!looksLikeRunning(body)) return null;
+
     return {
       kind: "llamaswap",
       baseUrl,

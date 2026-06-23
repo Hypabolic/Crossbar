@@ -3,9 +3,10 @@
  *
  * Wires the frozen core + Wave A/B/C modules into Pi's lifecycle:
  *   session_start  → load crossbar.json, register saved servers, auto-discover localhost,
- *                    install the loaded-model widget, start the health poll.
- *   /crossbar      → open the discovery / onboarding overlay (alias /local).
- *   session_shutdown → stop the poll, dispose the widget.
+ *                    install the loaded-model widget and paint it once.
+ *   /crossbar      → open the discovery / onboarding overlay (alias /local); the health/
+ *                    loaded poll runs only for the duration of this overlay.
+ *   session_shutdown → stop any running poll, dispose the widget.
  *
  * Secrets live only in Pi's auth.json (via the CredentialStore bridge); crossbar.json holds metadata.
  */
@@ -59,6 +60,30 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
    *  refreshed on every /crossbar Rescan which does the full sweep when LAN on).
    *  Passed as initialDiscovered so opening /crossbar does not re-scan. */
   let lastDiscovered: DiscoveredServer[] = [];
+  // Servers "hidden for this session" — lives for the whole Pi session (until reload),
+  // so a hide survives closing and reopening /crossbar. Permanent dismissals are persisted.
+  const sessionHidden = new Set<string>();
+
+  // The health/loaded poll runs ONLY while /crossbar is open — during normal coding
+  // Crossbar never touches the backend. Each tick probes health + the loaded-model
+  // widget; the model catalogue is NOT re-listed here (that happens on startup, rescan,
+  // and manage actions only). Idempotent start/stop so reopening can't stack timers.
+  const startPoll = (): void => {
+    if (pollTimer || !registry) return;
+    const reg = registry;
+    const tick = async (): Promise<void> => {
+      await pollAll(reg);
+      await widget?.refresh();
+    };
+    void tick();
+    pollTimer = setInterval(() => void tick(), HEALTH_POLL_MS);
+  };
+  const stopPoll = (): void => {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = undefined;
+    }
+  };
 
   // Discovery honours CrossbarSettings: custom probe ports always, plus opt-in LAN
   // probing. When LAN discovery is on and no explicit hosts are given, sweep the
@@ -73,9 +98,15 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
     const ports =
       settings?.probePorts && settings.probePorts.length > 0 ? settings.probePorts : undefined;
 
+    // Hide servers the user has dismissed (e.g. a reachable Ollama with only
+    // embedding models) from every consumer — both /crossbar and auto-register.
+    const reg = registry;
+    const keep = (list: DiscoveredServer[]): DiscoveredServer[] =>
+      reg ? list.filter((s) => !reg.isDismissed(s.baseUrl)) : list;
+
     const local = await discoverLocalhost(adapters, ports ? { ports } : undefined);
     if (opts?.includeLan === false || !settings?.lanDiscovery) {
-      return local;
+      return keep(local);
     }
 
     // Explicit hosts/CIDRs win; otherwise auto-scan the local subnet(s).
@@ -83,7 +114,7 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
       settings.lanHosts && settings.lanHosts.length > 0 ? settings.lanHosts : localSubnetCidrs();
     const { hosts } = expandHosts(specs);
     if (hosts.length === 0) {
-      return local; // LAN on but nothing to probe (no hosts and no detectable subnet)
+      return keep(local); // LAN on but nothing to probe (no hosts and no detectable subnet)
     }
 
     // A subnet sweep is hundreds of origins — probe many at once with a short
@@ -97,7 +128,7 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
       livenessFirst: true,
     });
     const seen = new Set(local.map((s) => s.baseUrl));
-    return [...local, ...lan.filter((s) => !seen.has(s.baseUrl))];
+    return keep([...local, ...lan.filter((s) => !seen.has(s.baseUrl))]);
   };
 
   /** Best-effort: refresh a server's model list and (re)register it with Pi. Returns models used. */
@@ -194,19 +225,12 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
       if (ctx.hasUI) ctx.ui.setStatus(SCAN_STATUS_KEY, undefined);
     }
 
-    // 3) Loaded-model widget + health poll (UI modes only — a long-lived timer must
-    //    not keep one-shot/headless CLI runs alive). Each tick refreshes health +
-    //    models (re-registering on change) for every enabled server, then repaints.
+    // 3) Loaded-model widget (UI modes only). Paint the current loaded state once at
+    //    startup, but do NOT start a recurring timer here — the periodic poll runs only
+    //    while /crossbar is open (see openCmd), so a backgrounded session is silent.
     if (ctx.hasUI) {
       widget = installLoadedWidget(pi, ctx, reg);
-      const tick = async (): Promise<void> => {
-        await pollAll(pi, reg);
-        await widget?.refresh();
-      };
-      await tick();
-      pollTimer = setInterval(() => {
-        void tick();
-      }, HEALTH_POLL_MS);
+      await widget.refresh();
     }
   });
 
@@ -242,15 +266,22 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
       ctx.ui.notify("Crossbar is still initialising — try again in a moment.", "warning");
       return;
     }
-    await openOnboarding(pi, ctx, {
-      registry,
-      discover: async () => {
-        lastDiscovered = await discover();
-        return lastDiscovered;
-      },
-      initialDiscovered: lastDiscovered,
-    });
-    await widget?.refresh();
+    // Health/loaded polling is live only for the duration of this management session.
+    startPoll();
+    try {
+      await openOnboarding(pi, ctx, {
+        registry,
+        discover: async () => {
+          lastDiscovered = await discover();
+          return lastDiscovered;
+        },
+        initialDiscovered: lastDiscovered,
+        sessionHidden,
+      });
+    } finally {
+      stopPoll();
+      await widget?.refresh();
+    }
   };
 
   pi.registerCommand("crossbar", {
