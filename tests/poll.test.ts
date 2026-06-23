@@ -65,10 +65,10 @@ function fakeAdapter(kind: BackendKind, opts: FakeAdapterOpts): BackendAdapter {
   const adapter: Partial<BackendAdapter> = {
     kind,
     capabilities: caps,
-    async listModels(): Promise<ModelDescriptor[]> {
+    listModels: vi.fn(async (): Promise<ModelDescriptor[]> => {
       if (opts.models instanceof Error) throw opts.models;
       return opts.models ?? [];
-    },
+    }),
   };
   if (opts.hasHealth !== false) {
     adapter.health = async () => {
@@ -222,8 +222,11 @@ describe("catalogueChanged", () => {
 // ── pollServer ────────────────────────────────────────────────────────────────
 
 describe("pollServer", () => {
-  it("records the health state and refreshes models without re-registering when unchanged", async () => {
-    __adapterMap.set("ollama", fakeAdapter("ollama", { health: "healthy", models: [model("a")] }));
+  it("records the health state without touching the model catalogue", async () => {
+    // The periodic poll no longer lists models for health-capable backends — health()
+    // is the reachability signal, and the catalogue is refreshed elsewhere (on demand).
+    const adapter = fakeAdapter("ollama", { health: "healthy", models: [model("a")] });
+    __adapterMap.set("ollama", adapter);
     const rec = record({ lastKnownModels: [model("a")] });
     const { registry, healthSet, setLastKnownModelsSpy } = fakeRegistry(rec);
 
@@ -231,47 +234,24 @@ describe("pollServer", () => {
 
     expect(state).toBe("healthy");
     expect(healthSet).toEqual(["healthy"]);
+    expect(adapter.listModels).not.toHaveBeenCalled();
     expect(reRegisterSpy).not.toHaveBeenCalled();
     expect(setLastKnownModelsSpy).not.toHaveBeenCalled();
   });
 
-  it("persists the catalogue THEN re-registers when the model set changed", async () => {
-    __adapterMap.set("ollama", fakeAdapter("ollama", { models: [model("a"), model("b")] }));
-    const rec = record({ lastKnownModels: [model("a")] });
-    const { registry, setLastKnownModelsSpy } = fakeRegistry(rec);
-
-    // Track call order
-    const callOrder: string[] = [];
-    setLastKnownModelsSpy.mockImplementation(async () => { callOrder.push("setLastKnownModels"); });
-    reRegisterSpy.mockImplementation(async () => { callOrder.push("reRegister"); });
-
-    await pollServer(pi, registry, rec);
-
-    expect(setLastKnownModelsSpy).toHaveBeenCalledTimes(1);
-    expect(reRegisterSpy).toHaveBeenCalledTimes(1);
-    // Persist must happen before re-register
-    expect(callOrder).toEqual(["setLastKnownModels", "reRegister"]);
-  });
-
-  it("does NOT call setLastKnownModels when catalogue is unchanged", async () => {
-    __adapterMap.set("ollama", fakeAdapter("ollama", { models: [model("a")] }));
+  it("does NOT persist or re-register even when the model set changed", async () => {
+    // Catalogue refresh is no longer periodic: a changed model set on a health-capable
+    // backend is ignored by the poll (it isn't even listed) — refresh happens on rescan.
+    const adapter = fakeAdapter("ollama", { models: [model("a"), model("b")] });
+    __adapterMap.set("ollama", adapter);
     const rec = record({ lastKnownModels: [model("a")] });
     const { registry, setLastKnownModelsSpy } = fakeRegistry(rec);
 
     await pollServer(pi, registry, rec);
 
+    expect(adapter.listModels).not.toHaveBeenCalled();
     expect(setLastKnownModelsSpy).not.toHaveBeenCalled();
     expect(reRegisterSpy).not.toHaveBeenCalled();
-  });
-
-  it("re-registers when the model set changed", async () => {
-    __adapterMap.set("ollama", fakeAdapter("ollama", { models: [model("a"), model("b")] }));
-    const rec = record({ lastKnownModels: [model("a")] });
-    const { registry } = fakeRegistry(rec);
-
-    await pollServer(pi, registry, rec);
-
-    expect(reRegisterSpy).toHaveBeenCalledTimes(1);
   });
 
   it("reports unreachable when the health probe throws", async () => {
@@ -286,15 +266,18 @@ describe("pollServer", () => {
     expect(healthSet).toEqual(["unreachable"]);
   });
 
-  it("infers healthy from listModels for backends without a health endpoint", async () => {
-    __adapterMap.set(
-      "openai-generic",
-      fakeAdapter("openai-generic", { hasHealth: false, models: [model("a")] }),
-    );
+  it("infers healthy from listModels for backends without a health endpoint, but never re-registers", async () => {
+    // Health-less backends still need ONE listModels as their reachability signal, but
+    // the periodic poll must not re-register even when the catalogue differs.
+    const adapter = fakeAdapter("openai-generic", { hasHealth: false, models: [model("a"), model("b")] });
+    __adapterMap.set("openai-generic", adapter);
     const rec = record({ kind: "openai-generic", lastKnownModels: [model("a")] });
-    const { registry } = fakeRegistry(rec);
+    const { registry, setLastKnownModelsSpy } = fakeRegistry(rec);
 
     expect(await pollServer(pi, registry, rec)).toBe("healthy");
+    expect(adapter.listModels).toHaveBeenCalledTimes(1);
+    expect(setLastKnownModelsSpy).not.toHaveBeenCalled();
+    expect(reRegisterSpy).not.toHaveBeenCalled();
   });
 
   it("infers unreachable when listModels fails and there is no health endpoint", async () => {
@@ -322,14 +305,4 @@ describe("pollServer", () => {
     ).toBe(true);
   });
 
-  it("calls setLastKnownModels with the new models when catalogue changed", async () => {
-    const newModels = [model("a"), model("b")];
-    __adapterMap.set("ollama", fakeAdapter("ollama", { models: newModels }));
-    const rec = record({ lastKnownModels: [model("a")] });
-    const { registry, setLastKnownModelsSpy } = fakeRegistry(rec);
-
-    await pollServer(pi, registry, rec);
-
-    expect(setLastKnownModelsSpy).toHaveBeenCalledWith(rec.id, newModels);
-  });
 });

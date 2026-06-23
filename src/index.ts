@@ -63,6 +63,27 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
   // so a hide survives closing and reopening /crossbar. Permanent dismissals are persisted.
   const sessionHidden = new Set<string>();
 
+  // The health/loaded poll runs ONLY while /crossbar is open — during normal coding
+  // Crossbar never touches the backend. Each tick probes health + the loaded-model
+  // widget; the model catalogue is NOT re-listed here (that happens on startup, rescan,
+  // and manage actions only). Idempotent start/stop so reopening can't stack timers.
+  const startPoll = (): void => {
+    if (pollTimer || !registry) return;
+    const reg = registry;
+    const tick = async (): Promise<void> => {
+      await pollAll(pi, reg);
+      await widget?.refresh();
+    };
+    void tick();
+    pollTimer = setInterval(() => void tick(), HEALTH_POLL_MS);
+  };
+  const stopPoll = (): void => {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = undefined;
+    }
+  };
+
   // Discovery honours CrossbarSettings: custom probe ports always, plus opt-in LAN
   // probing. When LAN discovery is on and no explicit hosts are given, sweep the
   // machine's own private subnet(s); explicit hosts/CIDRs override that. Reads
@@ -203,19 +224,12 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
       if (ctx.hasUI) ctx.ui.setStatus(SCAN_STATUS_KEY, undefined);
     }
 
-    // 3) Loaded-model widget + health poll (UI modes only — a long-lived timer must
-    //    not keep one-shot/headless CLI runs alive). Each tick refreshes health +
-    //    models (re-registering on change) for every enabled server, then repaints.
+    // 3) Loaded-model widget (UI modes only). Paint the current loaded state once at
+    //    startup, but do NOT start a recurring timer here — the periodic poll runs only
+    //    while /crossbar is open (see openCmd), so a backgrounded session is silent.
     if (ctx.hasUI) {
       widget = installLoadedWidget(pi, ctx, reg);
-      const tick = async (): Promise<void> => {
-        await pollAll(pi, reg);
-        await widget?.refresh();
-      };
-      await tick();
-      pollTimer = setInterval(() => {
-        void tick();
-      }, HEALTH_POLL_MS);
+      await widget.refresh();
     }
   });
 
@@ -251,16 +265,22 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
       ctx.ui.notify("Crossbar is still initialising — try again in a moment.", "warning");
       return;
     }
-    await openOnboarding(pi, ctx, {
-      registry,
-      discover: async () => {
-        lastDiscovered = await discover();
-        return lastDiscovered;
-      },
-      initialDiscovered: lastDiscovered,
-      sessionHidden,
-    });
-    await widget?.refresh();
+    // Health/loaded polling is live only for the duration of this management session.
+    startPoll();
+    try {
+      await openOnboarding(pi, ctx, {
+        registry,
+        discover: async () => {
+          lastDiscovered = await discover();
+          return lastDiscovered;
+        },
+        initialDiscovered: lastDiscovered,
+        sessionHidden,
+      });
+    } finally {
+      stopPoll();
+      await widget?.refresh();
+    }
   };
 
   pi.registerCommand("crossbar", {

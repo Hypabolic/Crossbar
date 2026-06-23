@@ -177,17 +177,27 @@ class LmStudioAdapter implements BackendAdapter {
    * so we drop to it whenever v1 doesn't pass the discriminator. Auth (401) and unreachable
    * (0) propagate untouched so they surface as real errors rather than a silent fallback.
    */
-  private async modelsResponse(probe: Probe): Promise<ProbeResult> {
+  /**
+   * Origins we've already learned serve the unrecognised v1 shape, so subsequent calls
+   * go straight to v0 instead of re-probing v1 every time. Without this, the periodic
+   * poll fires both endpoints on every tick. Keyed by base URL; a process restart clears
+   * it, so it self-heals if a server's API shape changes.
+   */
+  private readonly v0Origins = new Set<string>();
+
+  private async modelsResponse(probe: Probe, originKey: string): Promise<ProbeResult> {
+    if (this.v0Origins.has(originKey)) return probe(MODELS_V0);
     const v1 = await probe(MODELS_V1);
     if (v1.status === 401 || v1.status === 0) return v1;
     if (v1.ok && hasLmsDiscriminator(v1.json)) return v1;
+    this.v0Origins.add(originKey);
     return probe(MODELS_V0);
   }
 
   // --- fingerprint ----------------------------------------------------------
 
   async fingerprint(baseUrl: string, probe: Probe): Promise<DiscoveredServer | null> {
-    const r = await this.modelsResponse(probe);
+    const r = await this.modelsResponse(probe, baseUrl);
     if (!r.ok || r.status === 0) return null;
     if (!hasLmsDiscriminator(r.json)) return null;
 
@@ -203,11 +213,11 @@ class LmStudioAdapter implements BackendAdapter {
   // --- health ---------------------------------------------------------------
 
   async health(
-    _server: DiscoveredServer,
+    server: DiscoveredServer,
     _cred: ServerCredential,
     probe: Probe,
   ): Promise<HealthStatus> {
-    const r = await this.modelsResponse(probe);
+    const r = await this.modelsResponse(probe, server.baseUrl);
     if (r.status === 0) return { state: "unreachable" };
     if (r.status === 401) return { state: "unauthorized" };
     if (!r.ok) return { state: "degraded" };
@@ -219,11 +229,11 @@ class LmStudioAdapter implements BackendAdapter {
   // --- listModels -----------------------------------------------------------
 
   async listModels(
-    _server: DiscoveredServer,
+    server: DiscoveredServer,
     _cred: ServerCredential,
     probe: Probe,
   ): Promise<ModelDescriptor[]> {
-    const r = await this.modelsResponse(probe);
+    const r = await this.modelsResponse(probe, server.baseUrl);
     if (!r.ok) {
       if (r.status === 401) throw new Error("401 Unauthorized");
       if (r.status === 0) throw new Error("listModels failed: server unreachable");
@@ -237,11 +247,11 @@ class LmStudioAdapter implements BackendAdapter {
   // --- introspectLoaded -----------------------------------------------------
 
   async introspectLoaded(
-    _server: DiscoveredServer,
+    server: DiscoveredServer,
     _cred: ServerCredential,
     probe: Probe,
   ): Promise<LoadedState> {
-    const r = await this.modelsResponse(probe);
+    const r = await this.modelsResponse(probe, server.baseUrl);
     if (!r.ok) {
       if (r.status === 401) throw new Error("401 Unauthorized");
       if (r.status === 0) throw new Error("introspectLoaded failed: server unreachable");
@@ -268,7 +278,7 @@ class LmStudioAdapter implements BackendAdapter {
   // --- switchModel ----------------------------------------------------------
 
   async switchModel(
-    _server: DiscoveredServer,
+    server: DiscoveredServer,
     _cred: ServerCredential,
     modelId: string,
     probe: Probe,
@@ -286,7 +296,7 @@ class LmStudioAdapter implements BackendAdapter {
     }
 
     // Step 2: Confirm via model list that the target is now loaded
-    const r2 = await this.modelsResponse(probe);
+    const r2 = await this.modelsResponse(probe, server.baseUrl);
     if (!r2.ok) {
       if (r2.status === 0) throw new Error("switchModel confirmation failed: server went down");
       if (r2.status === 401) throw new Error("401 Unauthorized");
