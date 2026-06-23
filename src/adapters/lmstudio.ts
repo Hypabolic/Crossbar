@@ -185,13 +185,24 @@ class LmStudioAdapter implements BackendAdapter {
    */
   private readonly v0Origins = new Set<string>();
 
+  /** Normalise an origin for the v0 memo (lowercase, no trailing slash) so the same
+   *  server reached via cosmetically-different URLs shares one memo entry. */
+  private static memoKey(baseUrl: string): string {
+    return baseUrl.trim().toLowerCase().replace(/\/+$/, "");
+  }
+
   private async modelsResponse(probe: Probe, originKey: string): Promise<ProbeResult> {
-    if (this.v0Origins.has(originKey)) return probe(MODELS_V0);
+    const key = LmStudioAdapter.memoKey(originKey);
+    if (this.v0Origins.has(key)) return probe(MODELS_V0);
     const v1 = await probe(MODELS_V1);
     if (v1.status === 401 || v1.status === 0) return v1;
     if (v1.ok && hasLmsDiscriminator(v1.json)) return v1;
-    this.v0Origins.add(originKey);
-    return probe(MODELS_V0);
+    // v1 isn't a recognised LM Studio body — fall back to v0. Memoize the v0 preference
+    // ONLY once v0 actually validates, so a transient v1 error (500/429/malformed) can't
+    // pin the origin to v0 until reload; an unrecognised-but-recovering v1 keeps retrying.
+    const v0 = await probe(MODELS_V0);
+    if (v0.ok && hasLmsDiscriminator(v0.json)) this.v0Origins.add(key);
+    return v0;
   }
 
   // --- fingerprint ----------------------------------------------------------

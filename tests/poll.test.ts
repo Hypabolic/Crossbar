@@ -18,7 +18,6 @@ import type {
   ServerRecord,
 } from "../src/core/types.ts";
 import type { ServerRegistry } from "../src/registry/registry.ts";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ── Module mocks ──────────────────────────────────────────────────────────────
 
@@ -112,8 +111,6 @@ function fakeRegistry(rec: ServerRecord) {
   } as unknown as ServerRegistry;
   return { registry, healthSet, cachePatches, setLastKnownModelsSpy };
 }
-
-const pi = {} as ExtensionAPI;
 
 beforeEach(() => {
   reRegisterSpy.mockClear();
@@ -230,7 +227,7 @@ describe("pollServer", () => {
     const rec = record({ lastKnownModels: [model("a")] });
     const { registry, healthSet, setLastKnownModelsSpy } = fakeRegistry(rec);
 
-    const state = await pollServer(pi, registry, rec);
+    const state = await pollServer(registry, rec);
 
     expect(state).toBe("healthy");
     expect(healthSet).toEqual(["healthy"]);
@@ -247,7 +244,7 @@ describe("pollServer", () => {
     const rec = record({ lastKnownModels: [model("a")] });
     const { registry, setLastKnownModelsSpy } = fakeRegistry(rec);
 
-    await pollServer(pi, registry, rec);
+    await pollServer(registry, rec);
 
     expect(adapter.listModels).not.toHaveBeenCalled();
     expect(setLastKnownModelsSpy).not.toHaveBeenCalled();
@@ -262,7 +259,7 @@ describe("pollServer", () => {
     const rec = record({ lastKnownModels: [model("a")] });
     const { registry, healthSet } = fakeRegistry(rec);
 
-    expect(await pollServer(pi, registry, rec)).toBe("unreachable");
+    expect(await pollServer(registry, rec)).toBe("unreachable");
     expect(healthSet).toEqual(["unreachable"]);
   });
 
@@ -274,7 +271,7 @@ describe("pollServer", () => {
     const rec = record({ kind: "openai-generic", lastKnownModels: [model("a")] });
     const { registry, setLastKnownModelsSpy } = fakeRegistry(rec);
 
-    expect(await pollServer(pi, registry, rec)).toBe("healthy");
+    expect(await pollServer(registry, rec)).toBe("healthy");
     expect(adapter.listModels).toHaveBeenCalledTimes(1);
     expect(setLastKnownModelsSpy).not.toHaveBeenCalled();
     expect(reRegisterSpy).not.toHaveBeenCalled();
@@ -288,7 +285,7 @@ describe("pollServer", () => {
     const rec = record({ kind: "openai-generic", lastKnownModels: [model("a")] });
     const { registry } = fakeRegistry(rec);
 
-    expect(await pollServer(pi, registry, rec)).toBe("unreachable");
+    expect(await pollServer(registry, rec)).toBe("unreachable");
     expect(reRegisterSpy).not.toHaveBeenCalled();
   });
 
@@ -297,7 +294,7 @@ describe("pollServer", () => {
     const rec = record({ lastKnownModels: [model("a")] });
     const { registry, cachePatches } = fakeRegistry(rec);
 
-    await pollServer(pi, registry, rec);
+    await pollServer(registry, rec);
 
     // At least one cache patch with a lastSeenAt timestamp
     expect(

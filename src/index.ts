@@ -3,9 +3,10 @@
  *
  * Wires the frozen core + Wave A/B/C modules into Pi's lifecycle:
  *   session_start  → load crossbar.json, register saved servers, auto-discover localhost,
- *                    install the loaded-model widget, start the health poll.
- *   /crossbar      → open the discovery / onboarding overlay (alias /local).
- *   session_shutdown → stop the poll, dispose the widget.
+ *                    install the loaded-model widget and paint it once.
+ *   /crossbar      → open the discovery / onboarding overlay (alias /local); the health/
+ *                    loaded poll runs only for the duration of this overlay.
+ *   session_shutdown → stop any running poll, dispose the widget.
  *
  * Secrets live only in Pi's auth.json (via the CredentialStore bridge); crossbar.json holds metadata.
  */
@@ -71,7 +72,7 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
     if (pollTimer || !registry) return;
     const reg = registry;
     const tick = async (): Promise<void> => {
-      await pollAll(pi, reg);
+      await pollAll(reg);
       await widget?.refresh();
     };
     void tick();

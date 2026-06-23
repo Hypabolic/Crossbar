@@ -11,8 +11,6 @@
  * never calls `fetch` directly — only the adapter via the injected `Probe`.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-
 import { adapterFor } from "./adapters/index.ts";
 import { supports } from "./core/backend-adapter.ts";
 import { Capability } from "./core/capability.ts";
@@ -80,13 +78,12 @@ export function catalogueChanged(
 }
 
 /**
- * Poll a single server: refresh health + models, re-register on change, and write
- * the results to the registry cache. Returns the observed health state. The health
- * and model probes are caught and reported as `unreachable`; `pollAll` additionally
+ * Poll a single server: probe health (or one reachability listModels for health-less
+ * backends) and write the result to the registry cache. Returns the observed health
+ * state. Probes are caught and reported as `unreachable`; `pollAll` additionally
  * isolates any per-server rejection so one bad server never aborts the tick.
  */
 export async function pollServer(
-  pi: ExtensionAPI,
   registry: ServerRegistry,
   record: ServerRecord,
 ): Promise<HealthState> {
@@ -128,7 +125,7 @@ export async function pollServer(
 }
 
 /** Poll every enabled server concurrently; failures are isolated per server. */
-export async function pollAll(pi: ExtensionAPI, registry: ServerRegistry): Promise<void> {
+export async function pollAll(registry: ServerRegistry): Promise<void> {
   const records = registry.list().filter((r) => r.enabled);
-  await Promise.allSettled(records.map((r) => pollServer(pi, registry, r)));
+  await Promise.allSettled(records.map((r) => pollServer(registry, r)));
 }
