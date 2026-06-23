@@ -1,7 +1,7 @@
 {
   "name": "@hypabolic/crossbar",
   "version": "0.5.1",
-  "description": "The local/self-hosted inference connector for Pi — multi-backend discovery, model switching, and zero-JSON in-TUI onboarding for the Pi coding agent.",
+  "description": "Connect the Pi coding agent to local & self-hosted LLMs — Ollama, LM Studio, llama.cpp, llama-swap, vLLM, and any OpenAI-compatible server. Auto-discovery, model switching, and zero-JSON in-TUI onboarding.",
   "type": "module",
   "license": "MIT",
   "author": "Hypabolic",
