@@ -1075,6 +1075,13 @@ export interface OnboardingDeps {
    * does NOT trigger a fresh discovery; only the "⟳ Rescan" action runs discover().
    */
   initialDiscovered?: DiscoveredServer[];
+  /**
+   * Base URLs the user chose to "hide for this session" — discovered servers that are
+   * suppressed from the list without being persisted. Owned by the caller (the extension
+   * activation scope) so a hide survives closing and reopening /crossbar within one Pi
+   * session, and is forgotten on the next launch. Permanent dismissals live in the registry.
+   */
+  sessionHidden?: Set<string>;
 }
 
 function selectServerOverlay(
@@ -1153,8 +1160,9 @@ export async function openOnboarding(
   // (and that's where the LAN sweep happens).
   let discovered: DiscoveredServer[] = deps.initialDiscovered ?? [];
   // Servers hidden for THIS session only (not persisted): they reappear next launch.
-  // Permanent dismissals go to registry.dismiss() and are filtered inside discover().
-  const sessionHidden = new Set<string>();
+  // Owned by the caller so the hide survives reopening /crossbar within one session;
+  // permanent dismissals go to registry.dismiss() and are filtered inside discover().
+  const sessionHidden = deps.sessionHidden ?? new Set<string>();
   const rescan = async (): Promise<void> => {
     ctx.ui.notify("Crossbar: scanning for backends…", "info");
     try {
@@ -1165,7 +1173,12 @@ export async function openOnboarding(
   };
 
   while (true) {
-    const visible = discovered.filter((s) => !sessionHidden.has(s.baseUrl));
+    // Suppress both session-hidden and permanently-dismissed servers here too, so a
+    // dismiss takes effect immediately on the next render — even when the list is a
+    // stale `initialDiscovered` cache that never went back through the filtered discover().
+    const visible = discovered.filter(
+      (s) => !sessionHidden.has(s.baseUrl) && !registry.isDismissed(s.baseUrl),
+    );
     const chosenBaseUrl = await selectServerOverlay(
       ctx,
       buildDiscoveredItems(visible, registry.list(), (id) => registry.getHealth(id)),
@@ -1310,7 +1323,7 @@ export async function openOnboarding(
       if (choice === HIDE_ONCE) {
         sessionHidden.add(targetBaseUrl);
         ctx.ui.notify(
-          `Crossbar: hid ${discoveredServer.label} for now — it returns next time you open Crossbar.`,
+          `Crossbar: hid ${discoveredServer.label} for this session — it returns next time you launch.`,
           "info",
         );
       } else if (choice === DISMISS_FOREVER) {

@@ -59,6 +59,9 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
    *  refreshed on every /crossbar Rescan which does the full sweep when LAN on).
    *  Passed as initialDiscovered so opening /crossbar does not re-scan. */
   let lastDiscovered: DiscoveredServer[] = [];
+  // Servers "hidden for this session" — lives for the whole Pi session (until reload),
+  // so a hide survives closing and reopening /crossbar. Permanent dismissals are persisted.
+  const sessionHidden = new Set<string>();
 
   // Discovery honours CrossbarSettings: custom probe ports always, plus opt-in LAN
   // probing. When LAN discovery is on and no explicit hosts are given, sweep the
@@ -89,7 +92,7 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
       settings.lanHosts && settings.lanHosts.length > 0 ? settings.lanHosts : localSubnetCidrs();
     const { hosts } = expandHosts(specs);
     if (hosts.length === 0) {
-      return local; // LAN on but nothing to probe (no hosts and no detectable subnet)
+      return keep(local); // LAN on but nothing to probe (no hosts and no detectable subnet)
     }
 
     // A subnet sweep is hundreds of origins — probe many at once with a short
@@ -255,6 +258,7 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
         return lastDiscovered;
       },
       initialDiscovered: lastDiscovered,
+      sessionHidden,
     });
     await widget?.refresh();
   };
