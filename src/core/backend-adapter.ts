@@ -60,6 +60,19 @@ export interface BackendAdapter {
   /** Enumerate available models. Required (every backend supports {@link Capability.ListModels}). */
   listModels(server: DiscoveredServer, cred: ServerCredential, probe: Probe): Promise<ModelDescriptor[]>;
 
+  /**
+   * Enrich a single model with extra capability metadata (vision, reasoning, tools, etc.)
+   * beyond what {@link listModels} returns. Present iff `capabilities` has {@link Capability.PerModelCaps}.
+   * Default implementation returns an empty partial — adapters that do not need per-model
+   * enrichment (most backends get their signals from listModels already) can omit this.
+   */
+  perModelCaps?(
+    server: DiscoveredServer,
+    cred: ServerCredential,
+    probe: Probe,
+    modelId: string,
+  ): Promise<Partial<ModelDescriptor>>;
+
   /** Snapshot of currently-loaded models. Present iff {@link Capability.IntrospectLoaded}. */
   introspectLoaded?(
     server: DiscoveredServer,
@@ -104,6 +117,12 @@ export interface BackendAdapter {
 /** Narrowing helpers so the orchestrator never calls an absent optional method. */
 export const supports = (a: BackendAdapter, c: Capability): boolean => a.capabilities.has(c);
 
+export function hasPerModelCaps(
+  a: BackendAdapter,
+): a is BackendAdapter & Required<Pick<BackendAdapter, "perModelCaps">> {
+  return typeof a.perModelCaps === "function";
+}
+
 export function canSwitch(
   a: BackendAdapter,
 ): a is BackendAdapter & Required<Pick<BackendAdapter, "switchModel">> {
@@ -120,4 +139,10 @@ export function canLoadUnload(
   a: BackendAdapter,
 ): a is BackendAdapter & Required<Pick<BackendAdapter, "loadUnload">> {
   return typeof a.loadUnload === "function";
+}
+
+export function canPerModelCaps(
+  a: BackendAdapter,
+): a is BackendAdapter & Required<Pick<BackendAdapter, "perModelCaps">> {
+  return typeof a.perModelCaps === "function";
 }

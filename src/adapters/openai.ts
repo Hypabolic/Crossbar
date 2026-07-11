@@ -178,6 +178,14 @@ class OpenAiAdapter implements BackendAdapter {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
       maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS,
+      compat: {
+        supportsStore: true,
+        supportsDeveloperRole: true,
+        supportsReasoningEffort: true,
+        maxTokensField: "max_tokens",
+        supportsStrictMode: true,
+        supportsUsageInStreaming: true,
+      },
     };
   }
 

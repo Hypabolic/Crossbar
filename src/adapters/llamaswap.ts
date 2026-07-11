@@ -37,6 +37,8 @@ interface RunningBody {
 interface V1ModelsBody {
   data?: Array<{
     id: string;
+    name?: string;
+    [key: string]: unknown;
   }>;
 }
 
@@ -121,6 +123,7 @@ class LlamaswapAdapter implements BackendAdapter {
     Capability.LoadUnload,
     Capability.Health,
     Capability.Streaming,
+    Capability.PerModelCaps,
   ]);
 
   // --- fingerprint ----------------------------------------------------------
@@ -177,6 +180,130 @@ class LlamaswapAdapter implements BackendAdapter {
     return status;
   }
 
+  // --- helpers --------------------------------------------------------------
+
+  /** Coerce a value to a positive integer, else undefined. */
+  private static toPositiveInt(value: unknown): number | undefined {
+    if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
+    if (typeof value === "string" && /^\d+$/.test(value)) {
+      const n = Number(value);
+      return n > 0 ? n : undefined;
+    }
+    return undefined;
+  }
+
+  /** Extract context length from a /v1/models entry (top-level or nested metadata). */
+  private static extractContext(entry: Record<string, unknown>): number | undefined {
+    const top =
+      LlamaswapAdapter.toPositiveInt(entry.context_length) ??
+      LlamaswapAdapter.toPositiveInt(entry.max_context_length) ??
+      LlamaswapAdapter.toPositiveInt(entry.context_window);
+    if (top) return top;
+
+    const meta = entry.meta as Record<string, unknown> | undefined;
+    if (meta) {
+      const ls = meta.llamaswap as Record<string, unknown> | undefined;
+      if (ls) {
+        const fromLs =
+          LlamaswapAdapter.toPositiveInt(ls.context_length) ??
+          LlamaswapAdapter.toPositiveInt(ls.context) ??
+          LlamaswapAdapter.toPositiveInt(ls.max_context) ??
+          LlamaswapAdapter.toPositiveInt(ls.max_context_length);
+        if (fromLs) return fromLs;
+      }
+      const fromMeta = LlamaswapAdapter.toPositiveInt(meta.n_ctx);
+      if (fromMeta) return fromMeta;
+    }
+
+    const metadata = entry.metadata as Record<string, unknown> | undefined;
+    if (metadata) {
+      const fromMd =
+        LlamaswapAdapter.toPositiveInt(metadata.context_length) ??
+        LlamaswapAdapter.toPositiveInt(metadata.context);
+      if (fromMd) return fromMd;
+    }
+
+    return undefined;
+  }
+
+  /** Extract max tokens from a /v1/models entry. */
+  private static extractMaxTokens(entry: Record<string, unknown>): number | undefined {
+    const top =
+      LlamaswapAdapter.toPositiveInt(entry.output_length) ??
+      LlamaswapAdapter.toPositiveInt(entry.max_tokens);
+    if (top) return top;
+    const meta = entry.meta as Record<string, unknown> | undefined;
+    if (meta) {
+      const ls = meta.llamaswap as Record<string, unknown> | undefined;
+      if (ls) {
+        const fromLs =
+          LlamaswapAdapter.toPositiveInt(ls.output_length) ??
+          LlamaswapAdapter.toPositiveInt(ls.max_tokens);
+        if (fromLs) return fromLs;
+      }
+    }
+    return undefined;
+  }
+
+  /** Parse -c or --ctx-size from a llama-server command string. */
+  private static parseContextFromCmd(cmd: string): number | undefined {
+    const m1 = cmd.match(/(?:^|\s)--ctx-size(?:=|\s+)(\d+)/);
+    if (m1) return Number(m1[1]);
+    const m2 = cmd.match(/(?:^|\s)-c(?:=|\s+)(\d+)/);
+    if (m2) return Number(m2[1]);
+    return undefined;
+  }
+
+  /** Detect whether a model supports vision (image input). */
+  private static hasVision(entry: Record<string, unknown>): boolean {
+    const arch = entry.architecture as Record<string, unknown> | undefined;
+    if (arch?.input_modalities) {
+      const mods = arch.input_modalities as string[];
+      if (mods.includes("image")) return true;
+    }
+    const caps = entry.capabilities;
+    if (caps && typeof caps === "object" && !Array.isArray(caps)) {
+      if ((caps as Record<string, unknown>).vision === true) return true;
+    }
+    const id = typeof entry.id === "string" ? entry.id.toLowerCase() : "";
+    return /vision|multimodal|vl-|clip/.test(id);
+  }
+
+  /** Detect whether a model supports reasoning/thinking. */
+  private static hasReasoning(entry: Record<string, unknown>): boolean {
+    const caps = entry.capabilities;
+    if (caps && typeof caps === "object" && !Array.isArray(caps)) {
+      if ((caps as Record<string, unknown>).reasoning === true) return true;
+    }
+    if (Array.isArray(caps)) {
+      if (caps.some((c: string) => /reason|thinking/i.test(c))) return true;
+    }
+    const id = typeof entry.id === "string" ? entry.id.toLowerCase() : "";
+    return (
+      /(?:^|[-_:/.])(r1|qwq)(?:$|[-_:/.])/.test(id) ||
+      id.includes("deepseek-r1") ||
+      id.includes("qwen3") ||
+      id.includes("gpt-oss") ||
+      id.includes("magistral") ||
+      id.includes("reasoning") ||
+      id.includes("thinking")
+    );
+  }
+
+  /** Detect whether a model supports tools/function calling. */
+  private static hasTools(entry: Record<string, unknown>): boolean {
+    const caps = entry.capabilities;
+    if (caps && typeof caps === "object" && !Array.isArray(caps)) {
+      if ((caps as Record<string, unknown>).function_calling === true) return true;
+    }
+    const arch = entry.architecture as Record<string, unknown> | undefined;
+    if (arch?.supported_parameters) {
+      const params = arch.supported_parameters as string[];
+      if (params.includes("tools") || params.includes("tool_choice")) return true;
+    }
+    return false;
+  }
+
   // --- listModels -----------------------------------------------------------
 
   async listModels(
@@ -190,16 +317,53 @@ class LlamaswapAdapter implements BackendAdapter {
       if (r.status === 0) throw new Error("listModels failed: server unreachable");
       throw new Error(`listModels failed: status ${r.status}`);
     }
+
+    // Parse /v1/models — entries may carry context_length, metadata, etc.
     const body = r.json as V1ModelsBody | undefined;
-    const data = body?.data ?? [];
-    return data.map((entry) => ({
-      id: entry.id,
-      name: entry.id,
-      contextWindow: 8192,
-      maxTokens: 4096,
-      input: ["text"] as ("text" | "image")[],
-      reasoning: false,
-    }));
+    const entries = body?.data ?? [];
+
+    // Build a context map from /running (cmd parsing).
+    const ctxMap = new Map<string, number>();
+    try {
+      const runR = await probe("/running");
+      if (runR.ok && runR.json) {
+        const runBody = runR.json as { running?: Array<Record<string, unknown>> } | null;
+        const processes = runBody?.running ?? [];
+        await Promise.all(
+          processes.map(async (proc) => {
+            const modelId = typeof proc.model === "string" ? proc.model : undefined;
+            if (!modelId) return;
+            if (typeof proc.cmd === "string") {
+              const ctx = LlamaswapAdapter.parseContextFromCmd(proc.cmd);
+              if (ctx) ctxMap.set(modelId, ctx);
+            }
+          }),
+        );
+      }
+    } catch { /* /running is best-effort */ }
+
+    const DEFAULT_CTX = 262144;
+    const DEFAULT_MAX = 8192;
+
+    return entries.map((entry) => {
+      const entryCtx = LlamaswapAdapter.extractContext(entry as Record<string, unknown>);
+      const fromRunning = ctxMap.get(entry.id);
+      const contextWindow = entryCtx ?? fromRunning ?? DEFAULT_CTX;
+      const maxTokens = LlamaswapAdapter.extractMaxTokens(entry as Record<string, unknown>) ?? DEFAULT_MAX;
+      return {
+        id: entry.id,
+        name: entry.name ?? entry.id,
+        contextWindow,
+        maxTokens,
+        input: LlamaswapAdapter.hasVision(entry as Record<string, unknown>)
+          ? (["text", "image"] as ("text" | "image")[])
+          : (["text"] as ("text" | "image")[]),
+        reasoning: LlamaswapAdapter.hasReasoning(entry as Record<string, unknown>),
+        tools: LlamaswapAdapter.hasTools(entry as Record<string, unknown>),
+        embeddings: false,
+        loaded: false,
+      };
+    });
   }
 
   // --- introspectLoaded -----------------------------------------------------
@@ -283,6 +447,19 @@ class LlamaswapAdapter implements BackendAdapter {
     }
   }
 
+  // --- perModelCaps ---------------------------------------------------------
+
+  async perModelCaps(
+    _server: DiscoveredServer,
+    _cred: ServerCredential,
+    probe: Probe,
+    modelId: string,
+  ): Promise<Partial<ModelDescriptor>> {
+    // Return cached capabilities from listModels (already computed above).
+    // This is a no-op here since listModels already enriches each entry.
+    return {};
+  }
+
   // --- toPiModel ------------------------------------------------------------
 
   toPiModel(_server: DiscoveredServer, model: ModelDescriptor): PiModelEntry {
@@ -296,9 +473,16 @@ class LlamaswapAdapter implements BackendAdapter {
       // .cached_tokens` to `Usage.cacheRead` and displays it regardless of cost. Keep
       // streaming usage reporting on so those prompt-cache hits are recorded.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: model.contextWindow ?? 8192,
-      maxTokens: model.maxTokens ?? 4096,
-      compat: { supportsUsageInStreaming: true },
+      contextWindow: model.contextWindow ?? 262144,
+      maxTokens: model.maxTokens ?? 8192,
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        maxTokensField: "max_tokens",
+        supportsStrictMode: false,
+        supportsUsageInStreaming: true,
+      },
     };
   }
 

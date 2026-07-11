@@ -184,6 +184,42 @@ export class ServerRegistry {
   }
 
   // ---------------------------------------------------------------------------
+  // Context overrides (persisted alongside servers)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Set or clear a per-model context override for a server.
+   * Pass `ctxSize = undefined` to remove the override.
+   */
+  async setContextOverride(
+    id: string,
+    modelId: string,
+    ctxSize: number | undefined,
+  ): Promise<void> {
+    const existing = this.records.get(id);
+    if (!existing) return;
+    const overrides = { ...(existing.contextOverrides ?? {}) };
+    if (ctxSize === undefined) {
+      delete overrides[modelId];
+    } else {
+      overrides[modelId] = ctxSize;
+    }
+    const patch: Partial<ServerRecord> = { ...existing };
+    if (Object.keys(overrides).length > 0) {
+      patch.contextOverrides = overrides;
+    } else {
+      delete patch.contextOverrides;
+    }
+    this.records.set(id, patch as ServerRecord);
+    await this.flush();
+  }
+
+  /** Get the context overrides for a server, or empty map. */
+  getContextOverrides(id: string): Record<string, number> {
+    return this.records.get(id)?.contextOverrides ?? {};
+  }
+
+  // ---------------------------------------------------------------------------
   // Health / model cache (non-persisting fast-path — called from the poll loop)
   // ---------------------------------------------------------------------------
 
@@ -199,6 +235,42 @@ export class ServerRegistry {
     if (patch.loaded !== undefined) updated.lastKnownLoaded = patch.loaded;
     if (patch.lastSeenAt !== undefined) updated.lastSeenAt = patch.lastSeenAt;
     this.records.set(id, updated);
+  }
+
+  /**
+   * Apply context overrides to a list of models. Overrides take precedence over
+   * discovered context windows.
+   */
+  applyContextOverrides(models: ModelDescriptor[], overrides: Record<string, number>): ModelDescriptor[] {
+    if (Object.keys(overrides).length === 0) return models;
+    return models.map((m): ModelDescriptor => {
+      if (overrides[m.id] !== undefined) {
+        return {
+          id: m.id,
+          name: m.name,
+          contextWindow: overrides[m.id],
+          ...(m.maxTokens !== undefined ? { maxTokens: m.maxTokens } : {}),
+          input: m.input,
+          ...(m.reasoning !== undefined ? { reasoning: m.reasoning } : {}),
+          ...(m.tools !== undefined ? { tools: m.tools } : {}),
+          ...(m.embeddings !== undefined ? { embeddings: m.embeddings } : {}),
+          ...(m.loaded !== undefined ? { loaded: m.loaded } : {}),
+          ...(m.raw !== undefined ? { raw: m.raw } : {}),
+        } as ModelDescriptor;
+      }
+      return {
+        id: m.id,
+        name: m.name,
+        ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}),
+        ...(m.maxTokens !== undefined ? { maxTokens: m.maxTokens } : {}),
+        input: m.input,
+        ...(m.reasoning !== undefined ? { reasoning: m.reasoning } : {}),
+        ...(m.tools !== undefined ? { tools: m.tools } : {}),
+        ...(m.embeddings !== undefined ? { embeddings: m.embeddings } : {}),
+        ...(m.loaded !== undefined ? { loaded: m.loaded } : {}),
+        ...(m.raw !== undefined ? { raw: m.raw } : {}),
+      } as ModelDescriptor;
+    });
   }
 
   /** Record the latest health state for a server (ephemeral; drives the live widget). */

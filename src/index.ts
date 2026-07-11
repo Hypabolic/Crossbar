@@ -139,15 +139,21 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
     try {
       const probe = createProbe(record.baseUrl, { auth: cred });
       const liveModels = await adapter.listModels(recordToServer(record), cred, probe);
+      // Apply context overrides (persisted per-server, take precedence over discovered values).
+      const overrides = reg.getContextOverrides(record.id);
+      const modelsWithOverrides = reg.applyContextOverrides(liveModels, overrides);
       // Persist only when the catalogue changed in a registration-relevant way.
-      if (catalogueChanged(record.lastKnownModels, liveModels)) {
-        await reg.setLastKnownModels(record.id, liveModels);
+      if (catalogueChanged(record.lastKnownModels, modelsWithOverrides)) {
+        await reg.setLastKnownModels(record.id, modelsWithOverrides);
       }
       // Always update lastSeenAt ephemerally (no persist).
       reg.updateHealthCache(record.id, { lastSeenAt: Date.now() });
-      models = liveModels;
+      models = modelsWithOverrides;
     } catch {
       // Offline / unreachable — fall back to last-known models (may be empty).
+      // Apply overrides to cached models too.
+      const overrides = reg.getContextOverrides(record.id);
+      models = reg.applyContextOverrides(models, overrides);
     }
     const chatModelCount = models.filter((model) => !model.embeddings).length;
     if (chatModelCount === 0) return 0; // nothing registrable (server offline, no cache)
@@ -291,5 +297,92 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
   pi.registerCommand("local", {
     description: "Alias for /crossbar",
     handler: openCmd,
+  });
+
+  /**
+   * Set or clear a per-model context window override for a Crossbar server.
+   * Usage: /crossbar-set-context-length <server-id> <model-id> <tokens|auto>
+   *   tokens: positive integer (e.g. 32768)
+   *   auto: clear the override, use auto-detected value
+   */
+  const setContextLengthCmd = async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
+    if (!registry) {
+      ctx.ui.notify("Crossbar is still initialising — try again in a moment.", "warning");
+      return;
+    }
+
+    const parts = args.trim().split(/\s+/);
+    if (parts.length < 3) {
+      ctx.ui.notify(
+        "Usage: /crossbar-set-context-length <server-id> <model-id> <tokens|auto>\n" +
+        "  tokens: positive integer (e.g. 32768)\n" +
+        "  auto: clear the override, use auto-detected value",
+        "error",
+      );
+      return;
+    }
+
+    const serverIdStr = parts[0];
+    const modelId = parts[1];
+    const ctxSizeStr = parts[2];
+
+    if (!serverIdStr || !modelId || !ctxSizeStr) {
+      ctx.ui.notify("Invalid arguments. Usage: /crossbar-set-context-length <server-id> <model-id> <tokens|auto>", "error");
+      return;
+    }
+
+    // Find the server record by id or label
+    const record = registry.list().find(
+      (r) => r.id === serverIdStr || r.label === serverIdStr,
+    );
+    if (!record) {
+      ctx.ui.notify(
+        `Server "${serverIdStr}" not found. Run /crossbar to see available servers.`,
+        "error",
+      );
+      return;
+    }
+
+    if (ctxSizeStr === "auto") {
+      const ok = await ctx.ui.confirm(
+        "Clear context override",
+        `Use auto-detected context window for "${modelId}" on ${record.label}?`,
+      );
+      if (!ok) return;
+
+      await registry.setContextOverride(record.id, modelId, undefined);
+      ctx.ui.notify(
+        `Context override removed for "${modelId}" on ${record.label}. Now auto-detected.`,
+        "info",
+      );
+      return;
+    }
+
+    const ctxSize = Number(ctxSizeStr);
+    if (!Number.isInteger(ctxSize) || ctxSize < 1) {
+      ctx.ui.notify(
+        `Invalid context size: "${ctxSizeStr}". Use a positive integer or "auto".\n` +
+        "Example: /crossbar-set-context-length llama-swap-8080 my-model 32768",
+        "error",
+      );
+      return;
+    }
+
+    const ok = await ctx.ui.confirm(
+      "Set context override",
+      `Set context window to ${ctxSize} for "${modelId}" on ${record.label}?`,
+    );
+    if (!ok) return;
+
+    await registry.setContextOverride(record.id, modelId, ctxSize);
+    ctx.ui.notify(
+      `Context window for "${modelId}" on ${record.label} set to ${ctxSize}.`,
+      "info",
+    );
+  };
+
+  pi.registerCommand("crossbar-set-context-length", {
+    description: "Set or clear per-model context window override for a Crossbar server",
+    handler: setContextLengthCmd,
   });
 }

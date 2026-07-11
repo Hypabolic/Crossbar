@@ -144,6 +144,8 @@ export interface ServerRecord {
   lastKnownModels?: ModelDescriptor[];
   /** Cached loaded-model ids for the "currently loaded" widget when introspection is unavailable. */
   lastKnownLoaded?: string[];
+  /** Per-model context window overrides (model id → tokens). Overrides discovered values. */
+  contextOverrides?: Record<string, number>;
 }
 
 export interface CrossbarSettings {

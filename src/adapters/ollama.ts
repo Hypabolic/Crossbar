@@ -327,7 +327,14 @@ class OllamaAdapter implements BackendAdapter {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
       maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS,
-      compat: { supportsUsageInStreaming: true },
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        maxTokensField: "max_tokens",
+        supportsStrictMode: false,
+        supportsUsageInStreaming: true,
+      },
     };
   }
 

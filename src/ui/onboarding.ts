@@ -528,7 +528,7 @@ async function selectPiModel(
   return selected;
 }
 
-/** Fetch a server's models (live, falling back to last-known on failure). */
+/** Fetch a server's models (live, falling back to last-known on failure). Applies context overrides. */
 async function fetchModels(
   ctx: ExtensionCommandContext,
   registry: ServerRegistry,
@@ -538,10 +538,13 @@ async function fetchModels(
   const cred = await registry.resolveCredential(record);
   const probe = createProbe(record.baseUrl, { auth: cred, defaultTimeoutMs: 5000 });
   try {
-    return await adapter.listModels(serverFromRecord(record), cred, probe);
+    const liveModels = await adapter.listModels(serverFromRecord(record), cred, probe);
+    const overrides = registry.getContextOverrides(record.id);
+    return registry.applyContextOverrides(liveModels, overrides);
   } catch (err) {
     if (record.lastKnownModels && record.lastKnownModels.length > 0) {
-      return record.lastKnownModels;
+      const overrides = registry.getContextOverrides(record.id);
+      return registry.applyContextOverrides(record.lastKnownModels, overrides);
     }
     ctx.ui.notify(`Crossbar: could not list models — ${errMsg(err)}`, "error");
     return null;
