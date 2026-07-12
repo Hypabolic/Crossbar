@@ -37,6 +37,9 @@ interface V1ModelsBody {
     meta?: {
       n_ctx_train?: number;
     };
+    status?: {
+      args?: string[];
+    };
   }>;
 }
 
@@ -125,18 +128,38 @@ class LlamacppAdapter implements BackendAdapter {
     const hasVision = Array.isArray(props?.modalities) &&
       props!.modalities!.some((m) => m.toLowerCase().includes("vision") || m.toLowerCase().includes("image"));
 
+    /** Parse --ctx-size or -c from an args array (router mode). */
+    const parseCtxFromArgs = (args: string[] | undefined): number | undefined => {
+      if (!args) return undefined;
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === "--ctx-size" || args[i] === "-c") {
+          const next = args[i + 1];
+          if (next && /^\d+$/.test(next)) return Number(next);
+        }
+        // Also handle --ctx-size=150000 form
+        const m = args[i].match(/^--ctx-size=(\d+)$/);
+        if (m) return Number(m[1]);
+      }
+      return undefined;
+    };
+
     return data.map((entry) => {
+      const fromArgs = parseCtxFromArgs(entry.status?.args);
       const contextWindow =
+        fromArgs ??
         propsNCtx ??
         entry.meta?.n_ctx_train ??
-        8192;
+        262144;
       const descriptor: ModelDescriptor = {
         id: entry.id,
         name: entry.id,
         contextWindow,
-        maxTokens: 4096,
+        maxTokens: 8192,
         input: hasVision ? (["text", "image"] as ("text" | "image")[]) : (["text"] as ("text" | "image")[]),
         reasoning: false,
+        tools: false,
+        embeddings: false,
+        loaded: false,
       };
       return descriptor;
     });
@@ -189,6 +212,19 @@ class LlamacppAdapter implements BackendAdapter {
     };
   }
 
+  // --- perModelCaps ---------------------------------------------------------
+
+  async perModelCaps(
+    _server: DiscoveredServer,
+    _cred: ServerCredential,
+    probe: Probe,
+    _modelId: string,
+  ): Promise<Partial<ModelDescriptor>> {
+    // For a single-model llama-server, the adapter already reports context from
+    // /props. No per-model enrichment is needed.
+    return {};
+  }
+
   // --- toPiModel ------------------------------------------------------------
 
   toPiModel(_server: DiscoveredServer, model: ModelDescriptor): PiModelEntry {
@@ -202,8 +238,8 @@ class LlamacppAdapter implements BackendAdapter {
       // .cached_tokens` to `Usage.cacheRead` and displays it regardless of cost. Keep
       // streaming usage reporting on so those prompt-cache hits are recorded.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: model.contextWindow ?? 8192,
-      maxTokens: model.maxTokens ?? 4096,
+      contextWindow: model.contextWindow ?? 262144,
+      maxTokens: model.maxTokens ?? 8192,
       compat: {
         supportsStore: false,
         supportsDeveloperRole: false,
