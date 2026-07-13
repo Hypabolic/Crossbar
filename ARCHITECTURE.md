@@ -224,7 +224,7 @@ Discovery validated on **zero / one / many** servers (Phase 3 hardening).
 
 ### Deferred / not built
 - **Tokens/sec display** — blocked on upstream Pi (see `docs/tokens-per-second.md`).
-- **Per-model caps** for LM Studio / llama.cpp / vLLM are largely defaulted (those APIs don't expose
-  reasoning/tools/max-output); only context + vision are derived where available.
+- **Per-model caps** for LM Studio / llama.cpp / llama-swap / vLLM remain partial. Context is derived
+  from backend metadata when available; unknown output limits remain uncapped instead of using fabricated defaults.
 - **Live VRAM/TTL display** — `LoadedModelInfo.vramBytes`/`expiresAt` are collected by introspection but
   not yet surfaced in the widget.

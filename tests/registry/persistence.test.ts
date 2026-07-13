@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { loadConfig, saveConfig } from "../../src/registry/persistence.ts";
@@ -36,28 +36,220 @@ const minimalRecord: ServerRecord = {
 describe("loadConfig", () => {
   it("returns empty config when file does not exist", async () => {
     const config = await loadConfig({ dir });
-    expect(config).toEqual({ version: 1, servers: [] });
+    expect(config).toEqual({ version: 1, modelCacheVersion: 1, servers: [] });
   });
 
   it("returns empty config when file is not valid JSON", async () => {
-    const { writeFileSync } = await import("node:fs");
     writeFileSync(join(dir, "crossbar.json"), "not json");
     const config = await loadConfig({ dir });
-    expect(config).toEqual({ version: 1, servers: [] });
+    expect(config).toEqual({ version: 1, modelCacheVersion: 1, servers: [] });
   });
 
   it("returns empty config when version is wrong", async () => {
-    const { writeFileSync } = await import("node:fs");
     writeFileSync(join(dir, "crossbar.json"), JSON.stringify({ version: 2, servers: [] }));
     const config = await loadConfig({ dir });
-    expect(config).toEqual({ version: 1, servers: [] });
+    expect(config).toEqual({ version: 1, modelCacheVersion: 1, servers: [] });
   });
 
   it("round-trips a valid config", async () => {
-    const original: CrossbarConfigFile = { version: 1, servers: [minimalRecord] };
+    const original: CrossbarConfigFile = {
+      version: 1,
+      modelCacheVersion: 1,
+      servers: [minimalRecord],
+    };
     await saveConfig(original, { dir });
     const loaded = await loadConfig({ dir });
     expect(loaded).toEqual(original);
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["invalid", 2],
+  ])("migrates legacy model caches with a %s marker", async (_label, marker) => {
+    const settings = { lanDiscovery: true, probePorts: [8080, 8081] };
+    const legacy = {
+      version: 1,
+      ...(marker === undefined ? {} : { modelCacheVersion: marker }),
+      settings,
+      servers: [
+        {
+          ...minimalRecord,
+          id: "legacy-swap",
+          kind: "llamaswap",
+          lastKnownLoaded: ["swap-context-fallback"],
+          lastKnownModels: [
+            {
+              id: "swap-context-fallback",
+              name: "Swap context fallback",
+              input: ["text"],
+              contextWindow: 8192,
+              maxTokens: 2048,
+              tools: true,
+            },
+            {
+              id: "swap-max-fallback",
+              name: "Swap max fallback",
+              input: ["text"],
+              contextWindow: 32768,
+              maxTokens: 4096,
+            },
+          ],
+        },
+        {
+          ...minimalRecord,
+          id: "legacy-cpp",
+          kind: "llamacpp",
+          lastKnownModels: [
+            {
+              id: "cpp-context-fallback",
+              name: "Cpp context fallback",
+              input: ["text"],
+              contextWindow: 8192,
+              maxTokens: 2048,
+            },
+            {
+              id: "cpp-max-fallback",
+              name: "Cpp max fallback",
+              input: ["text"],
+              contextWindow: 32768,
+              maxTokens: 4096,
+            },
+            {
+              id: "cpp-invalid-context",
+              name: "Cpp invalid context",
+              input: ["text"],
+              contextWindow: 0,
+              maxTokens: 1024,
+              reasoning: true,
+            },
+          ],
+        },
+        {
+          ...minimalRecord,
+          id: "unaffected-ollama",
+          lastKnownModels: [
+            {
+              id: "ollama-legitimate",
+              name: "Ollama legitimate",
+              input: ["text"],
+              contextWindow: 8192,
+              maxTokens: 4096,
+            },
+          ],
+        },
+      ],
+    };
+    writeFileSync(join(dir, "crossbar.json"), JSON.stringify(legacy));
+
+    const loaded = await loadConfig({ dir });
+
+    expect(loaded).toEqual({
+      version: 1,
+      modelCacheVersion: 1,
+      settings,
+      servers: [
+        {
+          ...minimalRecord,
+          id: "legacy-swap",
+          kind: "llamaswap",
+          lastKnownLoaded: ["swap-context-fallback"],
+          lastKnownModels: [
+            {
+              id: "swap-context-fallback",
+              name: "Swap context fallback",
+              input: ["text"],
+              maxTokens: 2048,
+              tools: true,
+            },
+            {
+              id: "swap-max-fallback",
+              name: "Swap max fallback",
+              input: ["text"],
+              contextWindow: 32768,
+            },
+          ],
+        },
+        {
+          ...minimalRecord,
+          id: "legacy-cpp",
+          kind: "llamacpp",
+          lastKnownModels: [
+            {
+              id: "cpp-context-fallback",
+              name: "Cpp context fallback",
+              input: ["text"],
+              maxTokens: 2048,
+            },
+            {
+              id: "cpp-max-fallback",
+              name: "Cpp max fallback",
+              input: ["text"],
+              contextWindow: 32768,
+            },
+            {
+              id: "cpp-invalid-context",
+              name: "Cpp invalid context",
+              input: ["text"],
+              maxTokens: 1024,
+              reasoning: true,
+            },
+          ],
+        },
+        {
+          ...minimalRecord,
+          id: "unaffected-ollama",
+          lastKnownModels: [
+            {
+              id: "ollama-legitimate",
+              name: "Ollama legitimate",
+              input: ["text"],
+              contextWindow: 8192,
+              maxTokens: 4096,
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("trusts marker-1 model caches without re-migrating legitimate fallback-shaped values", async () => {
+    const marked: CrossbarConfigFile = {
+      version: 1,
+      modelCacheVersion: 1,
+      servers: [
+        {
+          ...minimalRecord,
+          id: "marked-swap",
+          kind: "llamaswap",
+          lastKnownModels: [
+            {
+              id: "swap-legitimate",
+              name: "Swap legitimate",
+              input: ["text"],
+              contextWindow: 8192,
+              maxTokens: 4096,
+            },
+          ],
+        },
+        {
+          ...minimalRecord,
+          id: "marked-cpp",
+          kind: "llamacpp",
+          lastKnownModels: [
+            {
+              id: "cpp-legitimate",
+              name: "Cpp legitimate",
+              input: ["text"],
+              contextWindow: 8192,
+              maxTokens: 4096,
+            },
+          ],
+        },
+      ],
+    };
+    writeFileSync(join(dir, "crossbar.json"), JSON.stringify(marked));
+
+    expect(await loadConfig({ dir })).toEqual(marked);
   });
 });
 
@@ -68,10 +260,10 @@ describe("loadConfig", () => {
 describe("saveConfig", () => {
   it("writes pretty-printed JSON", async () => {
     await saveConfig({ version: 1, servers: [minimalRecord] }, { dir });
-    const { readFileSync } = await import("node:fs");
     const text = readFileSync(join(dir, "crossbar.json"), "utf-8");
     // Pretty JSON has newlines
     expect(text).toContain("\n");
+    expect(JSON.parse(text)).toMatchObject({ version: 1, modelCacheVersion: 1 });
   });
 
   it("strips apiKey fields from server records", async () => {
@@ -81,7 +273,6 @@ describe("saveConfig", () => {
     };
     await saveConfig({ version: 1, servers: [leaky as unknown as ServerRecord] }, { dir });
 
-    const { readFileSync } = await import("node:fs");
     const text = readFileSync(join(dir, "crossbar.json"), "utf-8");
     expect(text).not.toContain("sk-secret-key");
     expect(text).not.toContain("apiKey");
@@ -103,7 +294,7 @@ describe("saveConfig", () => {
     const nested = join(dir, "nested", "deep");
     await saveConfig({ version: 1, servers: [] }, { dir: nested });
     const loaded = await loadConfig({ dir: nested });
-    expect(loaded).toEqual({ version: 1, servers: [] });
+    expect(loaded).toEqual({ version: 1, modelCacheVersion: 1, servers: [] });
   });
 });
 

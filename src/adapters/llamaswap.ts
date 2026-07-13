@@ -37,6 +37,8 @@ interface RunningBody {
 interface V1ModelsBody {
   data?: Array<{
     id: string;
+    context_length?: number | null;
+    meta?: Record<string, unknown> | null;
   }>;
 }
 
@@ -192,14 +194,22 @@ class LlamaswapAdapter implements BackendAdapter {
     }
     const body = r.json as V1ModelsBody | undefined;
     const data = body?.data ?? [];
-    return data.map((entry) => ({
-      id: entry.id,
-      name: entry.id,
-      contextWindow: 8192,
-      maxTokens: 4096,
-      input: ["text"] as ("text" | "image")[],
-      reasoning: false,
-    }));
+    return data.map((entry) => {
+      const contextWindow =
+        typeof entry.context_length === "number" &&
+        Number.isSafeInteger(entry.context_length) &&
+        entry.context_length > 0
+          ? entry.context_length
+          : undefined;
+
+      return {
+        id: entry.id,
+        name: entry.id,
+        ...(contextWindow !== undefined ? { contextWindow } : {}),
+        input: ["text"] as ("text" | "image")[],
+        reasoning: false,
+      };
+    });
   }
 
   // --- introspectLoaded -----------------------------------------------------
@@ -296,8 +306,18 @@ class LlamaswapAdapter implements BackendAdapter {
       // .cached_tokens` to `Usage.cacheRead` and displays it regardless of cost. Keep
       // streaming usage reporting on so those prompt-cache hits are recorded.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: model.contextWindow ?? 8192,
-      maxTokens: model.maxTokens ?? 4096,
+      contextWindow:
+        model.contextWindow !== undefined &&
+        Number.isSafeInteger(model.contextWindow) &&
+        model.contextWindow > 0
+          ? model.contextWindow
+          : 128_000,
+      maxTokens:
+        model.maxTokens !== undefined &&
+        Number.isSafeInteger(model.maxTokens) &&
+        model.maxTokens > 0
+          ? model.maxTokens
+          : 0,
       compat: { supportsUsageInStreaming: true },
     };
   }

@@ -180,6 +180,9 @@ export interface AdapterFixture {
     /** What `listModels` must return. */
     models: ExpectedModels;
 
+    /** Allow maxTokens=0 as the Pi sentinel for unknown/unbounded capacity. Defaults to false. */
+    maxTokensMayBeUnbounded?: boolean;
+
     /**
      * What `introspectLoaded` must return on the success path.
      * Required when `IntrospectLoaded` is in adapter.capabilities;

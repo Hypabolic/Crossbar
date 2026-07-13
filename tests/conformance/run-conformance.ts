@@ -147,9 +147,15 @@ function describeAdapter(fixture: AdapterFixture): void {
           expect(typeof entry.cost.cacheRead).toBe("number");
           expect(typeof entry.cost.cacheWrite).toBe("number");
           expect(typeof entry.contextWindow).toBe("number");
+          expect(Number.isFinite(entry.contextWindow)).toBe(true);
           expect(entry.contextWindow).toBeGreaterThan(0);
           expect(typeof entry.maxTokens).toBe("number");
-          expect(entry.maxTokens).toBeGreaterThan(0);
+          expect(Number.isFinite(entry.maxTokens)).toBe(true);
+          if (exp.maxTokensMayBeUnbounded === true) {
+            expect(entry.maxTokens).toBeGreaterThanOrEqual(0);
+          } else {
+            expect(entry.maxTokens).toBeGreaterThan(0);
+          }
           expect(typeof entry.reasoning).toBe("boolean");
         }
       });

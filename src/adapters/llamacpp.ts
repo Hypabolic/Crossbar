@@ -24,8 +24,14 @@ import type {
 
 interface PropsBody {
   default_generation_settings?: {
-    n_ctx?: number;
-  };
+    n_ctx?: number | null;
+    params?: {
+      n_predict?: number | null;
+      max_tokens?: number | null;
+    } | null;
+    /** Older llama-server payloads exposed this directly instead of under params. */
+    n_predict?: number | null;
+  } | null;
   build_info?: unknown;
   model_path?: string;
   modalities?: string[];
@@ -35,14 +41,63 @@ interface V1ModelsBody {
   data?: Array<{
     id: string;
     meta?: {
-      n_ctx_train?: number;
-    };
+      n_ctx?: number | null;
+      n_ctx_train?: number | null;
+    } | null;
+    status?: {
+      args?: string[] | null;
+    } | null;
   }>;
 }
 
 function basename(path: string): string {
   // Extract the last path segment, dropping any trailing slash.
   return path.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? path;
+}
+
+function positiveSafeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
+function firstPositiveSafeInteger(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const positive = positiveSafeInteger(value);
+    if (positive !== undefined) return positive;
+  }
+  return undefined;
+}
+
+function positiveIntegerArg(
+  args: readonly string[] | null | undefined,
+  names: readonly string[],
+): number | undefined {
+  if (!Array.isArray(args)) return undefined;
+
+  let found: number | undefined;
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (typeof arg !== "string") continue;
+
+    let rawValue: string | undefined;
+    if (names.includes(arg)) {
+      rawValue = args[index + 1];
+    } else {
+      for (const name of names) {
+        const prefix = `${name}=`;
+        if (arg.startsWith(prefix)) {
+          rawValue = arg.slice(prefix.length);
+          break;
+        }
+      }
+    }
+
+    if (rawValue === undefined) continue;
+    const value = positiveSafeInteger(Number(rawValue));
+    if (value !== undefined) found = value;
+  }
+  return found;
 }
 
 // ---------------------------------------------------------------------------
@@ -118,26 +173,40 @@ class LlamacppAdapter implements BackendAdapter {
     const body = r.json as V1ModelsBody | undefined;
     const data = body?.data ?? [];
 
-    // Fetch /props for context window and model_path
+    // Fetch root /props once. It reports effective runtime defaults for a
+    // single-server row, but is not per-model context in router mode.
     const propsResult = await probe("/props");
     const props = propsResult.ok ? (propsResult.json as PropsBody | undefined) : undefined;
-    const propsNCtx = props?.default_generation_settings?.n_ctx;
+    const propsNCtx = positiveSafeInteger(props?.default_generation_settings?.n_ctx);
+    const propsParams = props?.default_generation_settings?.params;
+    const propsMaxTokens = firstPositiveSafeInteger(
+      propsParams?.n_predict,
+      propsParams?.max_tokens,
+      props?.default_generation_settings?.n_predict,
+    );
     const hasVision = Array.isArray(props?.modalities) &&
-      props!.modalities!.some((m) => m.toLowerCase().includes("vision") || m.toLowerCase().includes("image"));
+      props.modalities.some((m) => m.toLowerCase().includes("vision") || m.toLowerCase().includes("image"));
 
     return data.map((entry) => {
-      const contextWindow =
-        propsNCtx ??
-        entry.meta?.n_ctx_train ??
-        8192;
+      const isRouterRow = entry.status != null;
+      const contextWindow = firstPositiveSafeInteger(
+        entry.meta?.n_ctx,
+        isRouterRow ? undefined : propsNCtx,
+        positiveIntegerArg(entry.status?.args, ["-c", "--ctx-size"]),
+        entry.meta?.n_ctx_train,
+      );
+      const maxTokens = firstPositiveSafeInteger(
+        positiveIntegerArg(entry.status?.args, ["-n", "--predict", "--n-predict"]),
+        propsMaxTokens,
+      );
       const descriptor: ModelDescriptor = {
         id: entry.id,
         name: entry.id,
-        contextWindow,
-        maxTokens: 4096,
-        input: hasVision ? (["text", "image"] as ("text" | "image")[]) : (["text"] as ("text" | "image")[]),
+        input: hasVision ? ["text", "image"] : ["text"],
         reasoning: false,
       };
+      if (contextWindow !== undefined) descriptor.contextWindow = contextWindow;
+      if (maxTokens !== undefined) descriptor.maxTokens = maxTokens;
       return descriptor;
     });
   }
@@ -202,8 +271,8 @@ class LlamacppAdapter implements BackendAdapter {
       // .cached_tokens` to `Usage.cacheRead` and displays it regardless of cost. Keep
       // streaming usage reporting on so those prompt-cache hits are recorded.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: model.contextWindow ?? 8192,
-      maxTokens: model.maxTokens ?? 4096,
+      contextWindow: positiveSafeInteger(model.contextWindow) ?? 128_000,
+      maxTokens: positiveSafeInteger(model.maxTokens) ?? 0,
       compat: { supportsUsageInStreaming: true },
     };
   }

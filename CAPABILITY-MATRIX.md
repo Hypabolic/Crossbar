@@ -8,8 +8,8 @@ adapter registers under (`oai` = `openai-completions`, `ant` = `anthropic-messag
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | **Ollama** | 11434 | oai | ✅ `/api/tags`,`/v1/models` | ✅ `/api/ps` | ✅ implicit (request id) | ✅ `keep_alive:0` | ◐ none local | ✅ `GET /` text | ✅ `/api/show` caps + ctx | ✅ | `GET /` → `Ollama is running` |
 | **LM Studio** | 1234 | oai | ✅ `/api/v1/models` (v0 fallback) | ✅ `state` field | ✅ JIT + `/api/v1/models/load` | ✅ load/unload + `lms` | ◐ Bearer, none default | ◐ infer 200 | ✅ type+`max_context_length` | ✅ | `/api/v1/models` (v0 fallback) w/ `state`,`compatibility_type` |
-| **llama-server** | 8080 | oai | ✅ `/v1/models` | ◐ `/props`,`/slots` (single) | ❌ (1/instance) | ❌ classic | ◐ none / `--api-key` | ✅ `/health` | ◐ ctx via `/props`,`meta` | ✅ | `/props` w/ `default_generation_settings`+`build_info` |
-| **llama-swap** | 8080 | oai/ant | ✅ `/v1/models` (all config) | ✅ `/running` | ✅ via `model` → restart upstream | ✅ `/api/models/unload`, ttl | ◐ optional multi-scheme | ✅ `/health`→OK | ◐ via upstream | ✅ | `/` → `/ui/`; `/running`,`/upstream/{model}` |
+| **llama-server** | 8080 | oai | ✅ `/v1/models` | ◐ `/props`,`/slots` (single) | ❌ (1/instance) | ❌ classic | ◐ none / `--api-key` | ✅ `/health` | ◐ ctx via `meta.n_ctx`, router args, `/props` | ✅ | `/props` w/ `default_generation_settings`+`build_info` |
+| **llama-swap** | 8080 | oai/ant | ✅ `/v1/models` (all config) | ✅ `/running` | ✅ via `model` → restart upstream | ✅ `/api/models/unload`, ttl | ◐ optional multi-scheme | ✅ `/health`→OK | ◐ ctx via `context_length`; output unknown | ✅ | `/` → `/ui/`; `/running`,`/upstream/{model}` |
 | **vLLM** | 8000 | oai | ✅ `/v1/models` | ◐ `/is_sleeping` (dev) | ❌ base · ◐ LoRA | ◐ sleep/wake + LoRA | ◐ none / `--api-key` | ✅ `/health` | ◐ `max_model_len` only | ✅ | `/version` + `/metrics` `vllm:` + `owned_by:"vllm"` |
 | **OpenAI** | cloud | oai | ✅ `/v1/models` | ❌ | ✅ (pick id) | ❌ managed | ✅ Bearer | ❌ (status page) | ❌ (static table needed) | ✅ | n/a (configured, not probed) |
 | **Anthropic** | cloud | ant | ✅ `/v1/models` | ❌ | ✅ (pick id) | ❌ managed | ✅ x-api-key+version | ❌ | ✅ caps + `max_input_tokens` | ✅ | n/a |
@@ -27,8 +27,8 @@ adapter registers under (`oai` = `openai-completions`, `ant` = `anthropic-messag
   bare llama-server is detected (it unlocks switching).
 - **introspectLoaded ❌/◐** (OpenAI, Anthropic, vLLM, llamafile) → show **last-known** selected model
   rather than a live "loaded" indicator; never claim live state we can't read.
-- **perModelCaps ❌** (OpenAI) / ◐ (most local) → fall back to a maintained static capability table and
-  conservative defaults (`contextWindow` from `/props`/`max_*` when present, else a safe default).
+- **perModelCaps ❌** (OpenAI) / ◐ (most local) → use reported context metadata when available;
+  backend-specific Pi registration fallbacks are not persisted as backend-reported model capabilities.
 - **auth ◐** → onboarding offers a no-auth toggle; probe public metadata endpoints first, only require a
   key for inference (a `401` on `/v1/chat/completions` but `200` on `/v1/models` ⇒ "running but keyed").
 - **loadUnload ✅** (Ollama, LM Studio, TabbyAPI, oobabooga, llama-swap) → expose explicit load/unload;
