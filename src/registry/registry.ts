@@ -234,7 +234,11 @@ export class ServerRegistry {
   // ---------------------------------------------------------------------------
 
   private async flush(): Promise<void> {
-    const config: CrossbarConfigFile = { version: 1, servers: this.list() };
+    const config: CrossbarConfigFile = {
+      version: 1,
+      modelCacheVersion: 1,
+      servers: this.list(),
+    };
     // Preserve discovery settings across every mutation — otherwise any server
     // add/remove/toggle would drop a user's LAN/probe-port configuration.
     if (this.settings && Object.keys(this.settings).length > 0) {

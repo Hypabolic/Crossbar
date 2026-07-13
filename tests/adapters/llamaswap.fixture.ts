@@ -168,6 +168,7 @@ export const llamaswapFixture: AdapterFixture = {
       excludedIds: [],
       minCount: 2,
     },
+    maxTokensMayBeUnbounded: true,
     loadedState: {
       anyOf: [MODEL_A],
       source: "introspection",

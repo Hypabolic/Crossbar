@@ -132,6 +132,7 @@ export const llamacppFixture: AdapterFixture = {
       excludedIds: [],
       minCount: 1,
     },
+    maxTokensMayBeUnbounded: true,
     loadedState: {
       anyOf: [MODEL_ID],
       source: "introspection",

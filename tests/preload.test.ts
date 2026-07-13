@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { saveConfig } from "../src/registry/persistence.ts";
@@ -128,6 +128,45 @@ describe("preloadCachedProviders", () => {
     expect(registerProvider.mock.calls[0]?.[0]).toBe(ollamaRecord.id);
   });
 
+  it("preloads an unmarked offline llama.cpp cache with its truthful 8192 context", async () => {
+    const legacyRecord: ServerRecord = {
+      id: "crossbar-llamacpp-127-0-0-1-8080",
+      kind: "llamacpp",
+      baseUrl: "http://127.0.0.1:8080",
+      label: "llama.cpp (127.0.0.1:8080)",
+      auth: "none",
+      enabled: true,
+      addedAt: 1000,
+      lastKnownModels: [
+        {
+          id: "truthful-8k",
+          name: "Truthful 8K",
+          contextWindow: 8192,
+          maxTokens: 4096,
+          input: ["text"],
+        },
+      ],
+    };
+    const unmarkedLegacyConfig = { version: 1, servers: [legacyRecord] };
+    writeFileSync(join(dir, "crossbar.json"), JSON.stringify(unmarkedLegacyConfig));
+    const { pi, registerProvider } = makeFakePi();
+
+    await preloadCachedProviders(pi, { dir });
+
+    expect(registerProvider).toHaveBeenCalledOnce();
+    expect(registerProvider.mock.calls[0]?.[0]).toBe(legacyRecord.id);
+    const config = registerProvider.mock.calls[0]?.[1] as {
+      models: Array<{ id: string; contextWindow: number; maxTokens: number }>;
+    };
+    expect(config.models).toEqual([
+      expect.objectContaining({
+        id: "truthful-8k",
+        contextWindow: 8192,
+        maxTokens: 0,
+      }),
+    ]);
+  });
+
   it("does not register a disabled server even if it has cached models", async () => {
     await writeCfg([{ ...ollamaRecord, enabled: false }]);
     const { pi, registerProvider } = makeFakePi();
@@ -222,7 +261,6 @@ describe("preloadCachedProviders", () => {
   });
 
   it("does not throw and registers zero when the config file is corrupt", async () => {
-    const { writeFileSync } = await import("node:fs");
     writeFileSync(join(dir, "crossbar.json"), "{ not valid json!!!");
     const { pi, registerProvider } = makeFakePi();
 

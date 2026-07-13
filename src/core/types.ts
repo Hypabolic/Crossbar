@@ -175,6 +175,8 @@ export interface CrossbarSettings {
 
 export interface CrossbarConfigFile {
   version: 1;
+  /** Version of the cached model-capability data. Missing or unknown values are migrated on load. */
+  modelCacheVersion?: 1;
   servers: ServerRecord[];
   settings?: CrossbarSettings;
 }

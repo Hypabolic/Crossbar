@@ -11,7 +11,7 @@ import { readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { CrossbarConfigFile, ServerRecord } from "../core/types.ts";
+import type { CrossbarConfigFile, ModelDescriptor, ServerRecord } from "../core/types.ts";
 
 export { tmpdir }; // re-export for tests
 
@@ -49,6 +49,45 @@ function stripSecrets(record: ServerRecord): ServerRecord {
   return safe;
 }
 
+const MODEL_CACHE_VERSION = 1 as const;
+
+function sanitizeLegacyModel(model: ModelDescriptor, kind: ServerRecord["kind"]): ModelDescriptor {
+  // llama-swap's 8192 was fabricated; positive llama.cpp contexts may be authoritative.
+  const removeContextWindow =
+    kind === "llamaswap"
+      ? model.contextWindow === 8192
+      : kind === "llamacpp" &&
+        typeof model.contextWindow === "number" &&
+        model.contextWindow <= 0;
+  const removeMaxTokens =
+    (kind === "llamaswap" || kind === "llamacpp") && model.maxTokens === 4096;
+
+  if (!removeContextWindow && !removeMaxTokens) return model;
+
+  const sanitized = { ...model };
+  if (removeContextWindow) delete sanitized.contextWindow;
+  if (removeMaxTokens) delete sanitized.maxTokens;
+  return sanitized;
+}
+
+function sanitizeLegacyModelCache(record: ServerRecord): ServerRecord {
+  if (
+    (record.kind !== "llamaswap" && record.kind !== "llamacpp") ||
+    !Array.isArray(record.lastKnownModels)
+  ) {
+    return record;
+  }
+
+  return {
+    ...record,
+    lastKnownModels: record.lastKnownModels.map((model) =>
+      typeof model === "object" && model !== null
+        ? sanitizeLegacyModel(model, record.kind)
+        : model,
+    ),
+  };
+}
+
 /**
  * Validate that a parsed value looks like a CrossbarConfigFile.
  * Returns the canonical form, or null if the value is invalid.
@@ -58,11 +97,15 @@ function parseConfigFile(raw: unknown): CrossbarConfigFile | null {
   const obj = raw as Record<string, unknown>;
   if (obj["version"] !== 1) return null;
   if (!Array.isArray(obj["servers"])) return null;
+
+  const isLegacyModelCache = obj["modelCacheVersion"] !== MODEL_CACHE_VERSION;
+  const servers = (obj["servers"] as unknown[]).filter(
+    (server): server is ServerRecord => typeof server === "object" && server !== null,
+  );
   const result: CrossbarConfigFile = {
     version: 1,
-    servers: (obj["servers"] as unknown[]).filter(
-      (s): s is ServerRecord => typeof s === "object" && s !== null,
-    ),
+    modelCacheVersion: MODEL_CACHE_VERSION,
+    servers: isLegacyModelCache ? servers.map(sanitizeLegacyModelCache) : servers,
   };
   const rawSettings = obj["settings"];
   if (typeof rawSettings === "object" && rawSettings !== null) {
@@ -71,7 +114,11 @@ function parseConfigFile(raw: unknown): CrossbarConfigFile | null {
   return result;
 }
 
-const EMPTY_CONFIG: CrossbarConfigFile = { version: 1, servers: [] };
+const EMPTY_CONFIG: CrossbarConfigFile = {
+  version: 1,
+  modelCacheVersion: MODEL_CACHE_VERSION,
+  servers: [],
+};
 
 /**
  * Load crossbar.json from the agent dir (or the override dir in tests).
@@ -99,6 +146,7 @@ export async function saveConfig(config: CrossbarConfigFile, opts?: PersistenceO
 
   const safe: CrossbarConfigFile = {
     ...config,
+    modelCacheVersion: MODEL_CACHE_VERSION,
     servers: config.servers.map(stripSecrets),
   };
 
