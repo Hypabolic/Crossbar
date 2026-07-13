@@ -65,7 +65,7 @@ describe("loadConfig", () => {
   it.each([
     ["missing", undefined],
     ["invalid", 2],
-  ])("migrates legacy model caches with a %s marker", async (_label, marker) => {
+  ])("migrates legacy llama-swap fallbacks without stripping positive llama.cpp context with a %s marker", async (_label, marker) => {
     const settings = { lanDiscovery: true, probePorts: [8080, 8081] };
     const legacy = {
       version: 1,
@@ -101,8 +101,8 @@ describe("loadConfig", () => {
           kind: "llamacpp",
           lastKnownModels: [
             {
-              id: "cpp-context-fallback",
-              name: "Cpp context fallback",
+              id: "cpp-authoritative-context",
+              name: "Cpp authoritative context",
               input: ["text"],
               contextWindow: 8192,
               maxTokens: 2048,
@@ -175,9 +175,10 @@ describe("loadConfig", () => {
           kind: "llamacpp",
           lastKnownModels: [
             {
-              id: "cpp-context-fallback",
-              name: "Cpp context fallback",
+              id: "cpp-authoritative-context",
+              name: "Cpp authoritative context",
               input: ["text"],
+              contextWindow: 8192,
               maxTokens: 2048,
             },
             {

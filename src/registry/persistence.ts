@@ -52,12 +52,13 @@ function stripSecrets(record: ServerRecord): ServerRecord {
 const MODEL_CACHE_VERSION = 1 as const;
 
 function sanitizeLegacyModel(model: ModelDescriptor, kind: ServerRecord["kind"]): ModelDescriptor {
+  // llama-swap's 8192 was fabricated; positive llama.cpp contexts may be authoritative.
   const removeContextWindow =
     kind === "llamaswap"
       ? model.contextWindow === 8192
       : kind === "llamacpp" &&
-        (model.contextWindow === 8192 ||
-          (typeof model.contextWindow === "number" && model.contextWindow <= 0));
+        typeof model.contextWindow === "number" &&
+        model.contextWindow <= 0;
   const removeMaxTokens =
     (kind === "llamaswap" || kind === "llamacpp") && model.maxTokens === 4096;
 

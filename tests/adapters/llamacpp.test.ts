@@ -71,6 +71,82 @@ describe("llama.cpp reported model limits", () => {
     expect(model?.maxTokens).toBe(maxTokens);
   });
 
+  it.each([
+    {
+      name: "uses later equals-form aliases after adjacent occurrences",
+      args: [
+        "-c",
+        "8192",
+        "--ctx-size=32768",
+        "-n",
+        "1024",
+        "--predict",
+        "2048",
+        "--n-predict=4096",
+      ],
+      contextWindow: 32768,
+      maxTokens: 4096,
+    },
+    {
+      name: "uses later adjacent aliases after equals-form occurrences",
+      args: [
+        "--ctx-size=32769",
+        "-c",
+        "16385",
+        "--n-predict=4097",
+        "--predict=3073",
+        "-n",
+        "2049",
+      ],
+      contextWindow: 16385,
+      maxTokens: 2049,
+    },
+    {
+      name: "keeps preceding valid values after invalid adjacent tails",
+      args: [
+        "--ctx-size=32770",
+        "--n-predict=4098",
+        "-c",
+        "invalid",
+        "-n",
+        "invalid",
+      ],
+      contextWindow: 32770,
+      maxTokens: 4098,
+    },
+    {
+      name: "consumes flag-looking tokens as invalid adjacent values",
+      args: [
+        "--ctx-size=32771",
+        "--n-predict=4099",
+        "-c",
+        "--ctx-size=65536",
+        "-n",
+        "--predict=8192",
+      ],
+      contextWindow: 32771,
+      maxTokens: 4099,
+    },
+  ])("$name", async ({ args, contextWindow, maxTokens }) => {
+    const [model] = await listModels(
+      [{
+        id: "repeated-alias-model",
+        meta: { n_ctx: null, n_ctx_train: 131072 },
+        status: { args },
+      }],
+      {
+        default_generation_settings: {
+          n_ctx: 0,
+          params: { n_predict: 0, max_tokens: 0 },
+          n_predict: 0,
+        },
+      },
+    );
+
+    expect(model?.contextWindow).toBe(contextWindow);
+    expect(model?.maxTokens).toBe(maxTokens);
+  });
+
   it("prefers router status context over conflicting positive root props", async () => {
     const [model] = await listModels(
       [{

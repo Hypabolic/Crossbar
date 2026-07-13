@@ -83,6 +83,7 @@ function positiveIntegerArg(
     let rawValue: string | undefined;
     if (names.includes(arg)) {
       rawValue = args[index + 1];
+      index++;
     } else {
       for (const name of names) {
         const prefix = `${name}=`;
