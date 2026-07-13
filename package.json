@@ -1,6 +1,6 @@
 {
   "name": "@hypabolic/crossbar",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Connect the Pi coding agent to local & self-hosted LLMs — Ollama, LM Studio, llama.cpp, llama-swap, vLLM, and any OpenAI-compatible server. Auto-discovery, model switching, and zero-JSON in-TUI onboarding.",
   "type": "module",
   "license": "MIT",
