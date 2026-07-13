@@ -3,24 +3,25 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-## [Unreleased]
+## [0.6.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.6.0) — 2026-07-13
+
+### Features
+- Map typed llama-swap metadata ([1a86059](https://github.com/Hypabolic/Crossbar/commit/1a8605993f9df441e300a8d3bc3d9369d23d1202))
 
 ### Bug Fixes
-- Use reported llama.cpp router and llama-swap context metadata, stop persisting zero or fabricated token limits, and migrate cached 8k/4k fallbacks ([#15](https://github.com/Hypabolic/Crossbar/issues/15))
+- Report llama context limits accurately (#17) ([c6818db](https://github.com/Hypabolic/Crossbar/commit/c6818dbee1ddd0a69aa3b63c011789510baf8ed6))
+
+### Documentation
+- Flesh out v0.5.1 entry [skip ci] ([03c3248](https://github.com/Hypabolic/Crossbar/commit/03c32489cd8982fc74069729b64928d880aea221))
+- V0.5.1 [skip ci] ([1d1a6c5](https://github.com/Hypabolic/Crossbar/commit/1d1a6c58b01d562cb326f5bd5f404dd3181ac15e))
 
 ## [0.5.1](https://github.com/Hypabolic/Crossbar/releases/tag/v0.5.1) — 2026-06-23
 
-### Features
-- Dismiss dead-end discovered servers — hide for the session or dismiss permanently ([#14](https://github.com/Hypabolic/Crossbar/pull/14))
-- Mark the currently-loaded model in the model picker ([#14](https://github.com/Hypabolic/Crossbar/pull/14))
-
 ### Bug Fixes
-- Detect newer LM Studio (`/api/v1/models` `{models:[]}` shape) and stop llama-swap false-positives; surface the real loaded context instead of the 8k default ([#14](https://github.com/Hypabolic/Crossbar/pull/14))
-- Run the health/loaded poll only while `/crossbar` is open and stop periodic catalogue re-listing — backgrounded sessions no longer ping backends ([#14](https://github.com/Hypabolic/Crossbar/pull/14))
 - Name backends in package description for plugin-search discoverability ([f793302](https://github.com/Hypabolic/Crossbar/commit/f7933025b9800ff1d2dfc7b249b9f0e7ac5a17f8))
 
-### Performance
-- LM Studio: memoize the v0 fallback so each model-list call is one request, not two ([#14](https://github.com/Hypabolic/Crossbar/pull/14))
+### Documentation
+- V0.5.0 [skip ci] ([afc8fe7](https://github.com/Hypabolic/Crossbar/commit/afc8fe7cc42fec013ab42ee030fe58bd05ea73c3))
 
 ## [0.5.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.5.0) — 2026-06-22
 
