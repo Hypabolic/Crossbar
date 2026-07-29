@@ -16,6 +16,7 @@ import { lmstudioAdapter } from "./lmstudio.ts";
 import { llamacppAdapter } from "./llamacpp.ts";
 import { llamaswapAdapter } from "./llamaswap.ts";
 import { vllmAdapter } from "./vllm.ts";
+import { omlxAdapter } from "./omlx.ts";
 import { openaiAdapter } from "./openai.ts";
 import { anthropicAdapter } from "./anthropic.ts";
 import { genericAdapter } from "./generic.ts";
@@ -27,6 +28,7 @@ export const ADAPTERS: readonly BackendAdapter[] = [
   llamacppAdapter,
   llamaswapAdapter,
   vllmAdapter,
+  omlxAdapter,
   openaiAdapter,
   anthropicAdapter,
   genericAdapter,
@@ -58,6 +60,7 @@ export {
   llamacppAdapter,
   llamaswapAdapter,
   vllmAdapter,
+  omlxAdapter,
   openaiAdapter,
   anthropicAdapter,
   genericAdapter,
