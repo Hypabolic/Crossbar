@@ -105,6 +105,11 @@ function makeHarness(customResults: unknown[]) {
       notify: vi.fn(),
       input: vi.fn(),
       select: vi.fn(),
+      setStatus: vi.fn(),
+      theme: {
+        fg: (token: string, text: string) => text,
+        bold: (text: string) => text,
+      },
     },
     modelRegistry: {
       find: (provider: string, modelId: string) => {

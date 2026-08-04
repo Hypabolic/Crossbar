@@ -77,7 +77,10 @@ export async function dedupByHostname(servers: DiscoveredServer[]): Promise<Disc
           };
         }
       }
-      return server;
+      return {
+        ...server,
+        label: shortLabel(server.baseUrl, server.kind),
+      };
     }),
   );
 
@@ -271,11 +274,11 @@ export async function discoverLocalhost(
     }
   }
 
-  // Resolve hostnames in parallel — updates both baseUrl and label.
+  // Resolve hostnames in parallel — always normalize the label, even if the
+  // baseUrl was already a hostname and did not change.
   const resolved = await Promise.all(
     deduplicated.map(async (server) => {
       const newBaseUrl = await resolveUrlHostname(server.baseUrl);
-      if (newBaseUrl === server.baseUrl) return server; // no change
       return {
         ...server,
         baseUrl: newBaseUrl,
@@ -373,11 +376,11 @@ export async function discoverLan(
     }
   }
 
-  // Resolve hostnames in parallel — updates both baseUrl and label.
+  // Resolve hostnames in parallel — always normalize the label, even if the
+  // baseUrl was already a hostname and did not change.
   const resolved = await Promise.all(
     deduplicated.map(async (server) => {
       const newBaseUrl = await resolveUrlHostname(server.baseUrl);
-      if (newBaseUrl === server.baseUrl) return server; // no change
       return {
         ...server,
         baseUrl: newBaseUrl,

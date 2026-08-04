@@ -35,6 +35,9 @@ import { shortHostname } from "../discovery/dns.ts";
 import { catalogueChanged } from "../poll.ts";
 import { DEFAULT_PROBE_PORTS } from "../discovery/engine.ts";
 
+/** Status-bar key for the transient "scanning…" indicator shown during discovery scans. */
+const SCAN_STATUS_KEY = "crossbar-scan";
+
 // ─── Pure helpers ────────────────────────────────────────────────────────────
 
 /**
@@ -1177,11 +1180,13 @@ export async function openOnboarding(
   // permanent dismissals go to registry.dismiss() and are filtered inside discover().
   const sessionHidden = deps.sessionHidden ?? new Set<string>();
   const rescan = async (): Promise<void> => {
-    ctx.ui.notify("Crossbar: scanning for backends…", "info");
+    ctx.ui.setStatus(SCAN_STATUS_KEY, ctx.ui.theme.fg("accent", "⟳ Crossbar: scanning for model servers…"));
     try {
       discovered = await discover();
     } catch {
       ctx.ui.notify("Crossbar: discovery failed; saved servers are still available.", "warning");
+    } finally {
+      ctx.ui.setStatus(SCAN_STATUS_KEY, undefined);
     }
   };
 
