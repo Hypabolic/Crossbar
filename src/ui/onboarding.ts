@@ -1189,8 +1189,9 @@ export async function openOnboarding(
         const progressCb: ProgressCallback = (c, t) => {
           completed = c;
           total = t;
+          const pct = total > 0 ? `${Math.round((c / t) * 100)}%` : "…%";
           loader.setMessage(
-            `Crossbar: scanning for model servers… (${completed}/${total}) — ESC to abort`,
+            `Crossbar: scanning for model servers… ${pct} — ESC to abort`,
           );
         };
 
