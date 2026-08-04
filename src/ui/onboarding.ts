@@ -795,8 +795,17 @@ async function performRemove(
 ): Promise<boolean> {
   const confirm = await ctx.ui.select(`Remove ${record.label}?`, ["Cancel", "Remove server"]);
   if (confirm !== "Remove server") return false;
-  unregisterServer(pi, record);
-  await registry.remove(record.id);
+  try {
+    unregisterServer(pi, record);
+  } catch {
+    // Best-effort — provider may already be unregistered.
+  }
+  try {
+    await registry.remove(record.id);
+  } catch (err) {
+    ctx.ui.notify(`Crossbar: could not remove ${record.label} — ${errMsg(err)}`, "error");
+    return false;
+  }
   ctx.ui.notify(
     `Crossbar: removed ${record.label}. If it was active, select another model with /model.`,
     "info",
@@ -1238,7 +1247,13 @@ export async function openOnboarding(
     } else {
       const existingRecord = registry.list().find((r) => r.baseUrl === chosenBaseUrl);
       if (existingRecord) {
+        const wasRecord = existingRecord;
         await openServerActions(pi, ctx, deps, existingRecord);
+        // If the server was removed from the registry, also drop it from the
+        // discovered cache so it does not reappear as "not added" on the next loop.
+        if (!registry.get(wasRecord.id)) {
+          discovered = discovered.filter((s) => s.baseUrl !== wasRecord.baseUrl);
+        }
         continue;
       }
 

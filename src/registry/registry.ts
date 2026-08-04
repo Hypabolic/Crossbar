@@ -159,9 +159,12 @@ export class ServerRegistry {
    * No-op (no throw) if the id is not found.
    */
   async remove(id: string): Promise<void> {
-    if (!this.records.has(id)) return;
+    const record = this.records.get(id);
+    if (!record) return;
     this.records.delete(id);
-    await this.store.remove(id);
+    if (record.auth !== "none") {
+      await this.store.remove(id);
+    }
     await this.flush();
   }
 
