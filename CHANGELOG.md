@@ -5,8 +5,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.7.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.7.0) — 2026-08-04
 
-### Documentation
-- V0.6.0 [skip ci] ([fb975a3](https://github.com/Hypabolic/Crossbar/commit/fb975a352d43d703505a41018d50edf3fb6c4a66))
+### Features
+- Add dedicated oMLX adapter for Apple Silicon LLM servers (`owned_by: "omlx"`), with correct `max_model_len` → context window mapping, load/switch, and thinking capability parsing ([#20](https://github.com/Hypabolic/Crossbar/pull/20)) ([60b05a3](https://github.com/Hypabolic/Crossbar/commit/60b05a3f794e64793bc72f1f52680693c859721a))
+
+### Bug Fixes
+- oMLX servers no longer show a hardcoded 8k ctx when advertising larger windows (e.g. 65536) ([#19](https://github.com/Hypabolic/Crossbar/issues/19), fixed by [#20](https://github.com/Hypabolic/Crossbar/pull/20))
 
 ## [0.6.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.6.0) — 2026-07-13
 
