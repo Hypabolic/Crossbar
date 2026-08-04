@@ -141,6 +141,14 @@ describe("dns resolveUrlHostname", () => {
     expect(result).toBe("http://dev.local:8000/v1/models?key=val#top");
   });
 
+  it("does not add a trailing slash when the original URL has none (regression)", async () => {
+    mockReverse.mockResolvedValue(["dagobert.fritz.box"]);
+    const { resolveUrlHostname } = await import("../../src/discovery/dns.ts");
+    const result = await resolveUrlHostname("http://192.168.188.173:8080");
+    expect(result).toBe("http://dagobert.fritz.box:8080");
+    expect(result.endsWith("/")).toBe(false);
+  });
+
   it("falls back to original URL on DNS failure", async () => {
     mockReverse.mockRejectedValue(new Error("DNS failed"));
     const { resolveUrlHostname } = await import("../../src/discovery/dns.ts");
