@@ -29,7 +29,7 @@ import type {
 } from "./types.ts";
 
 /** Bumped on any breaking change to this interface. Adapters and the registry assert on it. */
-export const CONTRACT_VERSION = 1 as const;
+export const CONTRACT_VERSION = 2 as const;
 
 /** Which built-in Pi API type the adapter registers its models under. */
 export type PiApiType = "openai-completions" | "anthropic-messages";

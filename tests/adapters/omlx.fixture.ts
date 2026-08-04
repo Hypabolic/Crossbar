@@ -65,9 +65,11 @@ const MODELS_STATUS_RESPONSE: ProbeResult = {
   headers: { "content-type": "application/json" },
   json: {
     object: "list",
-    data: [
+    // Prefer oMLX's `models` shape (also accepts OpenAI-style `data`).
+    models: [
       {
         id: MODEL_ID,
+        model_alias: MODEL_ID,
         model_path: MODEL_PATH,
         loaded: true,
         is_loading: false,
@@ -75,6 +77,8 @@ const MODELS_STATUS_RESPONSE: ProbeResult = {
         actual_size: ACTUAL_SIZE,
         max_context_window: CONTEXT_WINDOW,
         max_tokens: 32768,
+        model_type: "llm",
+        thinking_default: true,
       },
     ],
   },
