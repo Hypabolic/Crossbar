@@ -10,30 +10,106 @@
  * preserved in the `baseUrl` for correct DNS resolution.
  *
  * Shortening only applies to hostnames that share the same domain suffix as
- * the machine Crossbar is running on (detected via `os.hostname()`). Hostnames
- * on different domains are kept in full to avoid label collisions.
+ * the machine Crossbar is running on. We first inspect `os.hostname()`, then
+ * try cross-platform environment hints, then finally fall back to local resolver
+ * search/domain configuration where available (e.g. `/etc/resolv.conf`).
+ * Hostnames on different domains are kept in full to avoid label collisions.
  */
 
 import { reverse } from "node:dns/promises";
+import { readFileSync } from "node:fs";
 import { hostname } from "node:os";
 
 // ---------------------------------------------------------------------------
-// Local domain suffix — extracted from this machine's own hostname
+// Local domain suffix — extracted from this machine's hostname or resolver config
 // ---------------------------------------------------------------------------
 
+let localDomainCache: string | null | undefined;
+
+function domainSuffixOfHost(host: string): string | null {
+  const dotIndex = host.indexOf(".");
+  return dotIndex > 0 ? host.slice(dotIndex) : null;
+}
+
+function normalizeDomain(domain: string): string | null {
+  const trimmed = domain.trim().replace(/\.+$/, "");
+  if (!trimmed || trimmed === "local" || trimmed === "localhost") return null;
+  return trimmed.startsWith(".") ? trimmed : `.${trimmed}`;
+}
+
+function localDomainFromEnv(): string | null {
+  const candidates = [
+    process.env.USERDNSDOMAIN,
+    process.env.LOCALDOMAIN,
+    process.env.DOMAIN,
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const first = candidate.split(/[\s,;]+/).find((part) => part.length > 0);
+    const normalized = first ? normalizeDomain(first) : null;
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
+function localDomainFromResolvConf(): string | null {
+  try {
+    const text = readFileSync("/etc/resolv.conf", "utf8");
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith(";")) continue;
+
+      const searchMatch = trimmed.match(/^search\s+(.+)$/i);
+      if (searchMatch) {
+        const first = searchMatch[1].split(/\s+/).find((part) => part.length > 0);
+        const normalized = first ? normalizeDomain(first) : null;
+        if (normalized) return normalized;
+      }
+
+      const domainMatch = trimmed.match(/^domain\s+(.+)$/i);
+      if (domainMatch) {
+        const normalized = normalizeDomain(domainMatch[1]);
+        if (normalized) return normalized;
+      }
+    }
+  } catch {
+    // Best-effort only.
+  }
+  return null;
+}
+
 /**
- * Get the domain suffix of the local machine, or null if the hostname has no dot.
- * Computed lazily so tests can mock `os.hostname()` before first access.
+ * Get the domain suffix of the local machine, or null when none can be determined.
+ * Computed lazily and cached.
+ *
+ * Resolution order:
+ *   1. FQDN from `os.hostname()`
+ *   2. Cross-platform env hints (`USERDNSDOMAIN`, `LOCALDOMAIN`, `DOMAIN`)
+ *   3. Resolver search/domain config from `/etc/resolv.conf` when present
  *
  * Examples:
  *   `myMac.fritz.box`     → `.fritz.box`
- *   `myMac.home.arpa`     → `.home.arpa`
+ *   `USERDNSDOMAIN=fritz.box` → `.fritz.box`
+ *   `/etc/resolv.conf: search fritz.box` → `.fritz.box`
  *   `localhost`           → `null`
  */
 export function getLocalDomain(): string | null {
-  const localHostname = hostname();
-  const dotIndex = localHostname.indexOf(".");
-  return dotIndex > 0 ? localHostname.slice(dotIndex) : null;
+  if (localDomainCache !== undefined) return localDomainCache;
+
+  const fromHostname = domainSuffixOfHost(hostname());
+  if (fromHostname) {
+    localDomainCache = normalizeDomain(fromHostname);
+    return localDomainCache;
+  }
+
+  const fromEnv = localDomainFromEnv();
+  if (fromEnv) {
+    localDomainCache = fromEnv;
+    return localDomainCache;
+  }
+
+  localDomainCache = localDomainFromResolvConf();
+  return localDomainCache;
 }
 
 // ---------------------------------------------------------------------------
@@ -45,13 +121,15 @@ const cache = new Map<string, string | null>();
 /** Clear the cache between scan runs. */
 export function clearCache(): void {
   cache.clear();
+  localDomainCache = undefined;
 }
 
 /**
  * Strip the domain suffix from a hostname for display.
  *
  * Only shortens hostnames that share the same domain suffix as the local
- * machine (e.g. `macpro16.fritz.box` → `macpro16` when local is `myMac.fritz.box`).
+ * machine (e.g. `macpro16.fritz.box` → `macpro16` when local is `myMac.fritz.box`,
+ * `USERDNSDOMAIN=fritz.box`, or the resolver search domain is `fritz.box`).
  * Hostnames on different domains are kept in full to avoid label collisions.
  *
  * @param hostname - The hostname to potentially shorten.
