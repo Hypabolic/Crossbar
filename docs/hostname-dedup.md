@@ -9,7 +9,7 @@ entries** in the Crossbar server list:
 oMLX (127.0.0.1:8000)              — loopback
 oMLX (192.168.188.127:8000)        — WiFi NIC
 oMLX (192.168.139.3:8000)          — VPN/virtual NIC
-oMLX (macpro16.fritz.box:8000)     — hostname
+oMLX (workstation.local:8000)     — hostname
 ```
 
 All four entries point to the **same machine**. The user sees four identical
@@ -32,9 +32,9 @@ Each discovered IP is looked up via `dns.reverse()`:
 | IP | Resolves to |
 |---|---|
 | `127.0.0.1` | `localhost` (no lookup needed) |
-| `192.168.188.127` | `macpro16.fritz.box` |
-| `192.168.139.3` | `macpro16.fritz.box` |
-| `192.168.188.173` | `dagobert.fritz.box` |
+| `192.168.188.127` | `workstation.local` |
+| `192.168.139.3` | `workstation.local` |
+| `192.168.188.173` | `devbox.local` |
 
 **Caching:** Results are cached within a single scan run to avoid redundant
 DNS calls. `clearCache()` is called between scans.
@@ -55,7 +55,7 @@ Both `localhost` and the hostname/IP are discovered. **Prefer `localhost`:**
 | Before | After |
 |---|---|
 | `localhost:8000` | `localhost:8000` ✓ |
-| `macpro16.fritz.box:8000` | _(removed)_ |
+| `workstation.local:8000` | _(removed)_ |
 | `192.168.188.127:8000` | _(removed)_ |
 
 **Detection:** Crossbar checks its own hostname/IP against the discovered
@@ -72,10 +72,27 @@ Only the hostname/IP are discovered — `localhost` is not in the list.
 
 | Before | After |
 |---|---|
-| `dagobert.fritz.box:8080` | `dagobert.fritz.box:8080` ✓ |
+| `devbox.local:8080` | `devbox:8080` ✓ |
 
 **Why:** the OS DNS resolver picks the best route based on interface metrics,
 subnet affinity, and interface state.
+
+### Label shortening
+
+Hostnames are displayed **without their domain suffix** to save horizontal
+space in the UI. This only applies to hostnames that share the same domain
+suffix as the machine Crossbar is running on (detected via `os.hostname()`).
+
+| Local machine | Displayed label | Full hostname (baseUrl) |
+|---|---|---|
+| `local-host.local` | `devbox:8080` | `devbox.local` |
+| `local-host.local` | `remote.example.com:8080` | `remote.example.com` |
+| `local-host.local` | `192.168.188.173:8080` | `192.168.188.173` |
+
+**Why:**
+- Same-domain: short label saves space, no collision risk
+- Different-domain: full hostname avoids label collisions (e.g. two servers
+  both called `workstation` on different domains)
 
 ### Implementation details
 

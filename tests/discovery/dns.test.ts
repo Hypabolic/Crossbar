@@ -20,7 +20,16 @@ vi.mock("node:dns/promises", async (importOriginal) => {
   };
 });
 
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return {
+    ...actual,
+    hostname: vi.fn(actual.hostname),
+  };
+});
+
 const mockReverse = vi.mocked(reverse);
+const mockHostname = vi.mocked((await import("node:os")).hostname);
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -29,6 +38,8 @@ const mockReverse = vi.mocked(reverse);
 describe("dns resolveHostname", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Default: local machine is on .local domain
+    mockHostname.mockReturnValue("workstation.local");
   });
 
   afterEach(() => {
@@ -142,20 +153,38 @@ describe("dns resolveUrlHostname", () => {
   });
 
   it("does not add a trailing slash when the original URL has none (regression)", async () => {
-    mockReverse.mockResolvedValue(["dagobert.fritz.box"]);
+    mockReverse.mockResolvedValue(["devbox.local"]);
     const { resolveUrlHostname } = await import("../../src/discovery/dns.ts");
     const result = await resolveUrlHostname("http://192.168.188.173:8080");
-    expect(result).toBe("http://dagobert.fritz.box:8080");
+    expect(result).toBe("http://devbox.local:8080");
     expect(result.endsWith("/")).toBe(false);
   });
 
-  it("shortHostname strips domain suffix for display", async () => {
+  it("shortHostname strips domain suffix for same-domain hostnames", async () => {
     const { shortHostname } = await import("../../src/discovery/dns.ts");
-    expect(shortHostname("macpro16.fritz.box")).toBe("macpro16");
-    expect(shortHostname("dagobert.home.arpa")).toBe("dagobert");
-    expect(shortHostname("localhost")).toBe("localhost");
+    // Local machine is on .local
+    expect(shortHostname("workstation.local")).toBe("workstation");
+    expect(shortHostname("devbox.local")).toBe("devbox");
+  });
+
+  it("shortHostname keeps full hostname for different domains", async () => {
+    const { shortHostname } = await import("../../src/discovery/dns.ts");
+    // Local machine is on .local
+    expect(shortHostname("remote.example.com")).toBe("remote.example.com");
+    expect(shortHostname("vpn-server.corp.net")).toBe("vpn-server.corp.net");
+  });
+
+  it("shortHostname skips IPs and localhost", async () => {
+    const { shortHostname } = await import("../../src/discovery/dns.ts");
     expect(shortHostname("192.168.1.42")).toBe("192.168.1.42");
-    expect(shortHostname("deep.sub.domain.example.com")).toBe("deep");
+    expect(shortHostname("localhost")).toBe("localhost");
+  });
+
+  it("shortHostname with no local domain — no shortening", async () => {
+    mockHostname.mockReturnValue("localhost");
+    const { shortHostname } = await import("../../src/discovery/dns.ts");
+    expect(shortHostname("workstation.local")).toBe("workstation.local");
+    expect(shortHostname("remote.example.com")).toBe("remote.example.com");
   });
 
   it("falls back to original URL on DNS failure", async () => {

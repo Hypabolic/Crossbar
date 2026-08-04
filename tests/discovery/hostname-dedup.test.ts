@@ -21,6 +21,16 @@ vi.mock("node:dns/promises", async (importOriginal) => {
   };
 });
 
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return {
+    ...actual,
+    hostname: vi.fn(actual.hostname),
+  };
+});
+
+const mockHostname = vi.mocked((await import("node:os")).hostname);
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -41,6 +51,8 @@ function makeServer(baseUrl: string): DiscoveredServer {
 describe("dedupByHostname", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
+    // Local machine is on .local domain
+    mockHostname.mockReturnValue("workstation.local");
     // Clear DNS cache between tests
     const { clearCache } = await import("../../src/discovery/dns.ts");
     clearCache();
@@ -59,8 +71,8 @@ describe("dedupByHostname", () => {
 
   it("keeps different hostnames on same port", async () => {
     const servers = [
-      makeServer("http://macpro16.fritz.box:8000"),
-      makeServer("http://dagobert.fritz.box:8000"),
+      makeServer("http://workstation.local:8000"),
+      makeServer("http://devbox.local:8000"),
     ];
     const result = await dedupByHostname(servers);
     expect(result).toHaveLength(2);
@@ -68,8 +80,8 @@ describe("dedupByHostname", () => {
 
   it("same hostname different ports — both kept", async () => {
     const servers = [
-      makeServer("http://macpro16.fritz.box:8000"),
-      makeServer("http://macpro16.fritz.box:11434"),
+      makeServer("http://workstation.local:8000"),
+      makeServer("http://workstation.local:11434"),
     ];
     const result = await dedupByHostname(servers);
     expect(result).toHaveLength(2);
@@ -77,17 +89,17 @@ describe("dedupByHostname", () => {
 
   it("resolves multiple IPs to same hostname — collapses to one", async () => {
     // All three IPs resolve to the same hostname
-    vi.mocked(await import("node:dns/promises")).reverse.mockResolvedValue(["macpro16.fritz.box"]);
+    vi.mocked(await import("node:dns/promises")).reverse.mockResolvedValue(["workstation.local"]);
 
     const servers = [
       makeServer("http://192.168.188.127:8000"),
       makeServer("http://192.168.139.3:8000"),
-      makeServer("http://macpro16.fritz.box:8000"), // already resolved
+      makeServer("http://workstation.local:8000"), // already resolved
     ];
     const result = await dedupByHostname(servers);
     expect(result).toHaveLength(1);
     // URL constructor adds trailing slash for empty paths
-    expect(result[0]!.baseUrl.replace(/\/$/, "")).toBe("http://macpro16.fritz.box:8000");
+    expect(result[0]!.baseUrl.replace(/\/$/, "")).toBe("http://workstation.local:8000");
   });
 
   it("one IP resolves to hostname — preferred over unresolved IP", async () => {
@@ -132,15 +144,15 @@ describe("dedupByHostname", () => {
 
   it("labels use short hostname (domain suffix stripped)", async () => {
     vi.mocked(await import("node:dns/promises")).reverse.mockResolvedValue(
-      ["macpro16.fritz.box"],
+      ["workstation.local"],
     );
     const servers = [
       makeServer("http://192.168.188.127:8000"),
     ];
     const result = await dedupByHostname(servers);
     expect(result).toHaveLength(1);
-    // Label should show "macpro16" not "macpro16.fritz.box"
-    expect(result[0]!.label).toContain("macpro16:");
-    expect(result[0]!.label).not.toContain(".fritz.box");
+    // Label should show "workstation" not "workstation.local"
+    expect(result[0]!.label).toContain("workstation:");
+    expect(result[0]!.label).not.toContain(".local");
   });
 });

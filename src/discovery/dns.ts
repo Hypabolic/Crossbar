@@ -8,9 +8,33 @@
  * Hostnames are displayed without their domain suffix (e.g. `macpro16.fritz.box`
  * → `macpro16`) to save horizontal space in the UI. The full hostname is
  * preserved in the `baseUrl` for correct DNS resolution.
+ *
+ * Shortening only applies to hostnames that share the same domain suffix as
+ * the machine Crossbar is running on (detected via `os.hostname()`). Hostnames
+ * on different domains are kept in full to avoid label collisions.
  */
 
 import { reverse } from "node:dns/promises";
+import { hostname } from "node:os";
+
+// ---------------------------------------------------------------------------
+// Local domain suffix — extracted from this machine's own hostname
+// ---------------------------------------------------------------------------
+
+/**
+ * Get the domain suffix of the local machine, or null if the hostname has no dot.
+ * Computed lazily so tests can mock `os.hostname()` before first access.
+ *
+ * Examples:
+ *   `myMac.fritz.box`     → `.fritz.box`
+ *   `myMac.home.arpa`     → `.home.arpa`
+ *   `localhost`           → `null`
+ */
+export function getLocalDomain(): string | null {
+  const localHostname = hostname();
+  const dotIndex = localHostname.indexOf(".");
+  return dotIndex > 0 ? localHostname.slice(dotIndex) : null;
+}
 
 // ---------------------------------------------------------------------------
 // Cache — keyed by IP address, values are resolved hostnames or null on failure
@@ -26,18 +50,27 @@ export function clearCache(): void {
 /**
  * Strip the domain suffix from a hostname for display.
  *
- * Examples:
- *   `macpro16.fritz.box`    → `macpro16`
- *   `dagobert.home.arpa`    → `dagobert`
- *   `localhost`             → `localhost` (no dot — no-op)
- *   `192.168.1.42`          → `192.168.1.42` (IP — no-op)
+ * Only shortens hostnames that share the same domain suffix as the local
+ * machine (e.g. `macpro16.fritz.box` → `macpro16` when local is `myMac.fritz.box`).
+ * Hostnames on different domains are kept in full to avoid label collisions.
+ *
+ * @param hostname - The hostname to potentially shorten.
+ * @returns The short hostname, or the original if no shortening applies.
  */
 export function shortHostname(hostname: string): string {
   // Don't strip dots from IP addresses
   if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) return hostname;
   if (/^\[?[0-9a-fA-F:]+\]?$/.test(hostname)) return hostname; // IPv6
-  const dotIndex = hostname.indexOf(".");
-  return dotIndex > 0 ? hostname.slice(0, dotIndex) : hostname;
+
+  // No local domain suffix (e.g. localhost) — no shortening
+  const localDomain = getLocalDomain();
+  if (!localDomain) return hostname;
+
+  // Only shorten if the hostname shares our local domain suffix (case-insensitive)
+  const lowerHost = hostname.toLowerCase();
+  if (!lowerHost.endsWith(localDomain.toLowerCase())) return hostname;
+
+  return hostname.slice(0, hostname.indexOf("."));
 }
 
 // ---------------------------------------------------------------------------
