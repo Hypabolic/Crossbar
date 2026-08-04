@@ -7,7 +7,7 @@
  * Implements the BackendAdapter contract for oMLX's OpenAI-compatible HTTP API:
  *   - Fingerprint: GET /v1/models with owned_by:"omlx" and max_model_len
  *   - List models: GET /v1/models → ModelCard[] {id, max_model_len, owned_by, object, created}
- *   - Health: GET /health (empty 200 ⇒ healthy, no auth required)
+ *   - Health: GET /health (empty 200 ⇒ healthy; 503 ⇒ loading; no auth required)
  *   - IntrospectLoaded: GET /v1/models/status → loaded model residency
  *   - LoadUnload: POST /v1/models/{id}/load or /{id}/unload
  *   - SwitchModel: POST /v1/models/{id}/load → confirm via GET /v1/models/status
@@ -40,6 +40,8 @@ interface OmlxModelCard {
   owned_by?: string;
   max_model_len?: number;
   loaded?: boolean;
+  /** Some oMLX builds expose the human alias here instead of (or in addition to) the physical id. */
+  model_alias?: string;
 }
 
 interface OmlxModelsResponse {
@@ -49,6 +51,8 @@ interface OmlxModelsResponse {
 
 interface OmlxLoadedModelInfo {
   id: string;
+  /** Alias used by listModels / UI; load/unload often want the physical `id`. */
+  model_alias?: string;
   model_path?: string;
   loaded?: boolean;
   is_loading?: boolean;
@@ -73,6 +77,7 @@ interface OmlxLoadedModelInfo {
 interface OmlxModelsStatusResponse {
   object?: string;
   data?: OmlxLoadedModelInfo[];
+  /** Some oMLX builds nest the status list under `models` instead of OpenAI `data`. */
   models?: OmlxLoadedModelInfo[];
 }
 
@@ -82,6 +87,101 @@ interface OmlxModelsStatusResponse {
 
 const DEFAULT_CONTEXT_WINDOW = 8192;
 const DEFAULT_MAX_TOKENS = 4096;
+
+/** Id / type tokens that indicate non-chat (embedding, reranker, helper) models. */
+const NON_CHAT_ID_RE =
+  /(^|[/:._-])(embed|embedding|bge|gte|e5|reranker|rerank)([/:._-]|$)/i;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function authHeaders(cred: ServerCredential): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (cred.mode === "apiKey" && cred.apiKey) {
+    headers["Authorization"] = `Bearer ${cred.apiKey}`;
+  }
+  return headers;
+}
+
+/** Prefer `models`, fall back to OpenAI-style `data`. */
+function statusEntries(body: OmlxModelsStatusResponse | undefined): OmlxLoadedModelInfo[] {
+  if (!body) return [];
+  if (Array.isArray(body.models)) return body.models;
+  if (Array.isArray(body.data)) return body.data;
+  return [];
+}
+
+/**
+ * Build alias ↔ physical id maps from status entries.
+ * Keys are lowercased for case-insensitive lookup; values preserve original casing.
+ */
+function buildAliasMaps(statusData: OmlxLoadedModelInfo[]): {
+  /** Any known key (physical id or alias) → preferred physical id for load/unload. */
+  toPhysical: Map<string, string>;
+  /** Any known key → model_alias when present, else physical id (for list matching). */
+  toAlias: Map<string, string>;
+  /** Any known key → thinking_default. */
+  thinking: Map<string, boolean>;
+  /** Any known key → full status row. */
+  byKey: Map<string, OmlxLoadedModelInfo>;
+} {
+  const toPhysical = new Map<string, string>();
+  const toAlias = new Map<string, string>();
+  const thinking = new Map<string, boolean>();
+  const byKey = new Map<string, OmlxLoadedModelInfo>();
+
+  for (const m of statusData) {
+    const physical = m.id;
+    const alias = typeof m.model_alias === "string" && m.model_alias.length > 0 ? m.model_alias : undefined;
+    const keys = [physical, alias].filter((k): k is string => typeof k === "string" && k.length > 0);
+    const preferredAlias = alias ?? physical;
+    const thinks = m.thinking_default === true;
+
+    for (const k of keys) {
+      const lk = k.toLowerCase();
+      toPhysical.set(lk, physical);
+      toAlias.set(lk, preferredAlias);
+      thinking.set(lk, thinks);
+      byKey.set(lk, m);
+    }
+  }
+
+  return { toPhysical, toAlias, thinking, byKey };
+}
+
+function isNonChatModel(
+  listId: string,
+  status: OmlxLoadedModelInfo | undefined,
+): boolean {
+  const typeBits = [
+    status?.model_type,
+    status?.engine_type,
+    status?.config_model_type,
+  ]
+    .filter((s): s is string => typeof s === "string")
+    .join(" ")
+    .toLowerCase();
+
+  if (
+    typeBits.includes("embed") ||
+    typeBits.includes("rerank") ||
+    typeBits.includes("helper") ||
+    typeBits === "embedding" ||
+    typeBits === "reranker"
+  ) {
+    return true;
+  }
+
+  if (status?.is_helper === true) return true;
+
+  const normalizedId = listId.toLowerCase();
+  if (NON_CHAT_ID_RE.test(normalizedId) || normalizedId.includes("nomic-embed")) {
+    return true;
+  }
+
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // OmlxAdapter
@@ -146,6 +246,17 @@ class OmlxAdapter implements BackendAdapter {
       return s;
     }
     if (r.status === 401) return { state: "unauthorized" };
+    // oMLX (like vLLM) returns 503 while models are loading — not degraded.
+    if (r.status === 503) {
+      const bodyStatus = (r.json as { status?: string } | undefined)?.status;
+      const health: HealthStatus = { state: "loading" };
+      if (typeof bodyStatus === "string" && bodyStatus.length > 0) {
+        health.detail = bodyStatus;
+      } else {
+        health.detail = "status 503";
+      }
+      return health;
+    }
     if (!r.ok) return { state: "degraded", detail: `status ${r.status}` };
     const health: HealthStatus = { state: "healthy" };
     if (r.latencyMs !== undefined) health.latencyMs = r.latencyMs;
@@ -159,10 +270,7 @@ class OmlxAdapter implements BackendAdapter {
     cred: ServerCredential,
     probe: Probe,
   ): Promise<ModelDescriptor[]> {
-    const headers: Record<string, string> = {};
-    if (cred.mode === "apiKey" && cred.apiKey) {
-      headers["Authorization"] = `Bearer ${cred.apiKey}`;
-    }
+    const headers = authHeaders(cred);
 
     const r = await probe("/v1/models", { headers });
     if (!r.ok) {
@@ -174,32 +282,40 @@ class OmlxAdapter implements BackendAdapter {
     const body = r.json as OmlxModelsResponse | undefined;
     const rawModels = body?.data ?? [];
 
-    // Enrich with thinking capability from the status endpoint (when available).
-    let thinkingMap: Record<string, boolean> = {};
+    // Enrich from the status endpoint (thinking, alias↔physical, model_type).
+    let maps = buildAliasMaps([]);
     try {
       const statusR = await probe("/v1/models/status", { headers });
       if (statusR.ok) {
         const statusBody = statusR.json as OmlxModelsStatusResponse | undefined;
-        const statusData = (statusBody as { models?: OmlxLoadedModelInfo[] }).models ?? statusBody?.data ?? [];
-        thinkingMap = Object.fromEntries(
-          statusData.map((m) => [m.id, m.thinking_default === true]),
-        );
+        maps = buildAliasMaps(statusEntries(statusBody));
       }
     } catch {
-      // Status endpoint may not exist or be reachable — fall back to no-thinking.
+      // Status endpoint may not exist or be reachable — fall back gracefully.
     }
 
     return rawModels.map((m): ModelDescriptor => {
-      return {
-        id: m.id,
-        name: m.id,
+      const listId = m.id;
+      const lk = listId.toLowerCase();
+      const status = maps.byKey.get(lk);
+      // Prefer status model_alias when matching; also accept physical id as list id.
+      const thinking =
+        maps.thinking.get(lk) ??
+        (status?.thinking_default === true);
+
+      const isEmbedding = isNonChatModel(listId, status);
+
+      const desc: ModelDescriptor = {
+        id: listId,
+        name: listId,
         contextWindow: typeof m.max_model_len === "number" ? m.max_model_len : DEFAULT_CONTEXT_WINDOW,
         maxTokens: DEFAULT_MAX_TOKENS,
         input: ["text"],
-        reasoning: thinkingMap[m.id] ?? false,
-        embeddings: false,
+        reasoning: thinking === true,
+        embeddings: isEmbedding,
         raw: m,
       };
+      return desc;
     });
   }
 
@@ -210,10 +326,7 @@ class OmlxAdapter implements BackendAdapter {
     cred: ServerCredential,
     probe: Probe,
   ): Promise<LoadedState> {
-    const headers: Record<string, string> = {};
-    if (cred.mode === "apiKey" && cred.apiKey) {
-      headers["Authorization"] = `Bearer ${cred.apiKey}`;
-    }
+    const headers = authHeaders(cred);
 
     const r = await probe("/v1/models/status", { headers });
     if (!r.ok) {
@@ -223,26 +336,39 @@ class OmlxAdapter implements BackendAdapter {
     }
 
     const body = r.json as OmlxModelsStatusResponse | undefined;
-    const statusData = (body as { models?: OmlxLoadedModelInfo[] }).models ?? body?.data ?? [];
+    const statusData = statusEntries(body);
 
-    // Use per-model caps from the richer status response when available.
     const loadedModelIds: string[] = [];
     const perModel: Record<string, { vramBytes?: number; expiresAt?: number }> = {};
 
     for (const m of statusData) {
       if (m.loaded === true) {
-        loadedModelIds.push(m.id);
+        // Prefer alias for display/list consistency when present; keep physical as secondary key space via maps.
+        const displayId =
+          typeof m.model_alias === "string" && m.model_alias.length > 0 ? m.model_alias : m.id;
+        loadedModelIds.push(displayId);
+        // Also record physical id when it differs so switch confirmation by either key works upstream.
+        if (displayId !== m.id && !loadedModelIds.includes(m.id)) {
+          loadedModelIds.push(m.id);
+        }
         const info: { vramBytes?: number; expiresAt?: number } = {};
         if (m.actual_size !== undefined) info.vramBytes = m.actual_size;
-        perModel[m.id] = info;
+        perModel[displayId] = info;
+        if (displayId !== m.id) {
+          perModel[m.id] = info;
+        }
       }
     }
 
-    return {
+    // exactOptionalPropertyTypes: never pass explicit `undefined` for optional props.
+    const result: LoadedState = {
       loadedModelIds,
-      perModel: Object.keys(perModel).length > 0 ? perModel : undefined,
       source: "introspection",
     };
+    if (Object.keys(perModel).length > 0) {
+      result.perModel = perModel;
+    }
+    return result;
   }
 
   // --- switchModel ----------------------------------------------------------
@@ -253,20 +379,29 @@ class OmlxAdapter implements BackendAdapter {
     modelId: string,
     probe: Probe,
   ): Promise<void> {
-    // Step 1: trigger load by POSTing to /v1/models/{id}/load
-    const headers: Record<string, string> = {};
-    if (cred.mode === "apiKey" && cred.apiKey) {
-      headers["Authorization"] = `Bearer ${cred.apiKey}`;
+    const headers = authHeaders(cred);
+
+    // Resolve alias → physical id when status is available (load endpoints prefer physical/dir ids).
+    let loadId = modelId;
+    try {
+      const statusPre = await probe("/v1/models/status", { headers });
+      if (statusPre.ok) {
+        const maps = buildAliasMaps(statusEntries(statusPre.json as OmlxModelsStatusResponse | undefined));
+        const physical = maps.toPhysical.get(modelId.toLowerCase());
+        if (physical) loadId = physical;
+      }
+    } catch {
+      // Proceed with the caller-supplied id.
     }
 
-    const r1 = await probe(`/v1/models/${encodeURIComponent(modelId)}/load`, {
+    // Step 1: trigger load by POSTing to /v1/models/{id}/load
+    const r1 = await probe(`/v1/models/${encodeURIComponent(loadId)}/load`, {
       method: "POST",
       headers,
     });
     if (!r1.ok) {
       if (r1.status === 0) throw new Error("server unreachable during switch");
       if (r1.status === 401) throw new Error("401 Unauthorized during switch");
-      // oMLX returns {error: {message, type}} on failure — include it for debugging
       const errorBody = (r1.json as { error?: { message?: string } })?.error;
       throw new Error(
         `switchModel load failed: ${errorBody?.message ?? `status ${r1.status}`}`,
@@ -281,10 +416,17 @@ class OmlxAdapter implements BackendAdapter {
       throw new Error(`switchModel confirmation failed: status ${r2.status}`);
     }
 
-    const body = r2.json as OmlxModelsStatusResponse | undefined;
-    const loaded = (body as { models?: OmlxLoadedModelInfo[] }).models ?? body?.data ?? [];
-    const loadedIds = loaded.filter((m) => m.loaded === true).map((m) => m.id);
-    if (!loadedIds.includes(modelId)) {
+    const loaded = statusEntries(r2.json as OmlxModelsStatusResponse | undefined);
+    const targetKeys = new Set(
+      [modelId, loadId].map((k) => k.toLowerCase()),
+    );
+    const found = loaded.some((m) => {
+      if (m.loaded !== true) return false;
+      if (targetKeys.has(m.id.toLowerCase())) return true;
+      if (typeof m.model_alias === "string" && targetKeys.has(m.model_alias.toLowerCase())) return true;
+      return false;
+    });
+    if (!found) {
       throw new Error(
         `model-not-loaded: ${modelId} not found in /v1/models/status after switch`,
       );
@@ -300,14 +442,24 @@ class OmlxAdapter implements BackendAdapter {
     action: LoadAction,
     probe: Probe,
   ): Promise<void> {
-    const headers: Record<string, string> = {};
-    if (cred.mode === "apiKey" && cred.apiKey) {
-      headers["Authorization"] = `Bearer ${cred.apiKey}`;
+    const headers = authHeaders(cred);
+
+    // Prefer physical/dir id for load|unload when status can resolve an alias.
+    let targetId = modelId;
+    try {
+      const statusR = await probe("/v1/models/status", { headers });
+      if (statusR.ok) {
+        const maps = buildAliasMaps(statusEntries(statusR.json as OmlxModelsStatusResponse | undefined));
+        const physical = maps.toPhysical.get(modelId.toLowerCase());
+        if (physical) targetId = physical;
+      }
+    } catch {
+      // Proceed with the caller-supplied id.
     }
 
     const endpoint = action === "load"
-      ? `/v1/models/${encodeURIComponent(modelId)}/load`
-      : `/v1/models/${encodeURIComponent(modelId)}/unload`;
+      ? `/v1/models/${encodeURIComponent(targetId)}/load`
+      : `/v1/models/${encodeURIComponent(targetId)}/unload`;
 
     const r = await probe(endpoint, {
       method: "POST",
@@ -316,7 +468,6 @@ class OmlxAdapter implements BackendAdapter {
     if (!r.ok) {
       if (r.status === 0) throw new Error(`server unreachable during ${action}`);
       if (r.status === 401) throw new Error(`401 Unauthorized during ${action}`);
-      // oMLX returns {error: {message, type}} on failure — include it for debugging
       const errorBody = (r.json as { error?: { message?: string } })?.error;
       throw new Error(
         `loadUnload(${action}) failed: ${errorBody?.message ?? `status ${r.status}`}`,

@@ -20,13 +20,16 @@ import { vllmFixture } from "../adapters/vllm.fixture.ts";
 import { llamacppFixture } from "../adapters/llamacpp.fixture.ts";
 import { llamaswapFixture } from "../adapters/llamaswap.fixture.ts";
 import { genericFixture } from "../adapters/generic.fixture.ts";
+import { omlxFixture } from "../adapters/omlx.fixture.ts";
 
 // One distinct test port per local backend (llamacpp & llamaswap share :8080 in reality; we split
 // them here only so a single sweep can exercise both without an origin collision).
+// oMLX also defaults to :8000 in production — use a free port here so it coexists with vLLM.
 const PORT_FIXTURES: Record<number, { routes: RouteMap; kind: string; name: string }> = {
   11434: { routes: ollamaFixture.routes as RouteMap, kind: "ollama", name: "Ollama" },
   1234: { routes: lmstudioFixture.routes as RouteMap, kind: "lmstudio", name: "LM Studio" },
   8000: { routes: vllmFixture.routes as RouteMap, kind: "vllm", name: "vLLM" },
+  8001: { routes: omlxFixture.routes as RouteMap, kind: "omlx", name: "oMLX" },
   8080: { routes: llamacppFixture.routes as RouteMap, kind: "llamacpp", name: "llama.cpp" },
   8081: { routes: llamaswapFixture.routes as RouteMap, kind: "llamaswap", name: "llama-swap" },
   5999: { routes: genericFixture.routes as RouteMap, kind: "openai-generic", name: "generic" },
