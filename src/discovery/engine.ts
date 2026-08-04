@@ -221,7 +221,7 @@ export async function probeOrigin(
 // ────────────────────────────────────────────────────────────────────────────────
 
 export interface ProgressCallback {
-  (completed: number, total: number): void;
+  (completed: number, total: number, serversFound: number): void;
 }
 
 export interface DiscoverLocalhostOptions {
@@ -263,13 +263,15 @@ export async function discoverLocalhost(
 
   // Build per-origin tasks for bounded concurrency
   let completed = 0;
+  let serversFound = 0;
   const total = origins.length;
   const progress = opts?.progress;
   const tasks = origins.map((origin) => async (): Promise<DiscoveredServer | null> => {
     if (signal?.aborted) return null;
     const result = await probeOrigin(origin, localAdapters, timeoutMs, opts?.probeFactory);
+    if (result !== null) serversFound++;
     completed++;
-    progress?.(completed, total);
+    progress?.(completed, total, serversFound);
     return result;
   });
 
@@ -360,6 +362,7 @@ export async function discoverLan(
 
   const total = origins.length;
   let lanCompleted = 0;
+  let lanServersFound = 0;
   const lanProgress = opts?.progress;
   const tasks = origins.map((origin) => async (): Promise<DiscoveredServer | null> => {
     if (signal?.aborted) return null;
@@ -378,13 +381,14 @@ export async function discoverLan(
       }
       if (!alive) {
         lanCompleted++;
-        lanProgress?.(lanCompleted, total);
+        lanProgress?.(lanCompleted, total, lanServersFound);
         return null;
       }
     }
     const result = await probeOrigin(origin, localAdapters, timeoutMs, opts?.probeFactory);
+    if (result !== null) lanServersFound++;
     lanCompleted++;
-    lanProgress?.(lanCompleted, total);
+    lanProgress?.(lanCompleted, total, lanServersFound);
     return result;
   });
 

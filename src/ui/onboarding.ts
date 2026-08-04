@@ -1186,12 +1186,12 @@ export async function openOnboarding(
         let completed = 0;
         let total = 0;
 
-        const progressCb: ProgressCallback = (c, t) => {
+        const progressCb: ProgressCallback = (c, t, found) => {
           completed = c;
           total = t;
           const pct = total > 0 ? `${Math.round((c / t) * 100)}%` : "…%";
           loader.setMessage(
-            `Crossbar: scanning for model servers… ${pct} — ESC to abort`,
+            `Crossbar: scanning for model servers… ${pct} — ${found} found — ESC to abort`,
           );
         };
 

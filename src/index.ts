@@ -95,7 +95,7 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
   const discover = async (opts?: {
     includeLan?: boolean;
     abortSignal?: AbortSignal;
-    progress?: (completed: number, total: number) => void;
+    progress?: (completed: number, total: number, serversFound: number) => void;
   }): Promise<DiscoveredServer[]> => {
     const adapters = [...DISCOVERY_ADAPTERS];
     const settings = registry?.getSettings();
