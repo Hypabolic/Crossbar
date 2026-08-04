@@ -20,7 +20,7 @@
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder, getSelectListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, type SelectItem, SelectList, Text, matchesKey, Loader } from "@earendil-works/pi-tui";
+import { Container, type SelectItem, SelectList, Text, matchesKey, CancellableLoader } from "@earendil-works/pi-tui";
 
 import type { BackendAdapter } from "../core/backend-adapter.ts";
 import { canIntrospect, canLoadUnload, canSwitch } from "../core/backend-adapter.ts";
@@ -33,7 +33,7 @@ import { createProbe } from "../discovery/probe.ts";
 import { expandHosts, localSubnetCidrs } from "../discovery/subnet.ts";
 import { shortHostname } from "../discovery/dns.ts";
 import { catalogueChanged } from "../poll.ts";
-import { DEFAULT_PROBE_PORTS } from "../discovery/engine.ts";
+import { DEFAULT_PROBE_PORTS, type ProgressCallback } from "../discovery/engine.ts";
 
 /** Status-bar key for the transient "scanning…" indicator shown during discovery scans. */
 const SCAN_STATUS_KEY = "crossbar-scan";
@@ -1084,7 +1084,7 @@ async function openProbePorts(ctx: ExtensionCommandContext, registry: ServerRegi
 
 export interface OnboardingDeps {
   registry: ServerRegistry;
-  discover: () => Promise<DiscoveredServer[]>;
+  discover: (opts?: { abortSignal?: AbortSignal; progress?: ProgressCallback }) => Promise<DiscoveredServer[]>;
   /**
    * Seed the server list with results from a prior scan (startup localhost probe,
    * or the last explicit Rescan). Opening /crossbar shows this immediately and
@@ -1182,12 +1182,28 @@ export async function openOnboarding(
   const rescan = async (): Promise<void> => {
     await ctx.ui.custom<void>(
       (tui, theme, _kb, done) => {
-        const loader = new Loader(
+        const abortCtrl = new AbortController();
+        let completed = 0;
+        let total = 0;
+
+        const progressCb: ProgressCallback = (c, t) => {
+          completed = c;
+          total = t;
+          loader.setMessage(
+            `Crossbar: scanning for model servers… (${completed}/${total}) — ESC to abort`,
+          );
+        };
+
+        const loader = new CancellableLoader(
           tui,
           (s) => theme.fg("accent", s),
           (s) => theme.fg("dim", s),
           "Crossbar: scanning for model servers…",
         );
+        loader.onAbort = () => {
+          abortCtrl.abort();
+          done();
+        };
         loader.start();
 
         const container = new Container();
@@ -1196,16 +1212,22 @@ export async function openOnboarding(
         container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
 
         // Run scan in background; close overlay when done (loading or success).
-        discover()
+        deps
+          .discover({ abortSignal: abortCtrl.signal, progress: progressCb })
           .then((models) => {
             discovered = models;
+            done();
           })
-          .catch(() => {
-            ctx.ui.notify("Crossbar: discovery failed; saved servers are still available.", "warning");
+          .catch((err) => {
+            if (err?.name === "AbortError") {
+              ctx.ui.notify("Crossbar: scan aborted.", "info");
+            } else {
+              ctx.ui.notify("Crossbar: discovery failed; saved servers are still available.", "warning");
+            }
+            done();
           })
           .finally(() => {
             loader.stop();
-            done();
           });
 
         return container;
