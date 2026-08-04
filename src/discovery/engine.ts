@@ -17,6 +17,93 @@ import { CLOUD_KINDS } from "../core/capability.ts";
 import type { BackendAdapter } from "../core/backend-adapter.ts";
 import type { DiscoveredServer, Probe } from "../core/types.ts";
 import { createProbe } from "./probe.ts";
+import { resolveUrlHostname, resolveHostname, shortHostname } from "./dns.ts";
+
+// ---------------------------------------------------------------------------
+// Dedup helpers
+// ---------------------------------------------------------------------------
+
+/** Derive a short display name for a server (short hostname + port). */
+function shortLabel(baseUrl: string, kind: string): string {
+  const parsed = new URL(baseUrl);
+  const displayHost = shortHostname(parsed.hostname);
+  return `${kind} (${displayHost}:${parsed.port})`;
+}
+
+/** Extract the hostname+port key from a baseUrl for deduplication. */
+function hostPortKey(baseUrl: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    return baseUrl; // malformed — use as-is
+  }
+  return `${parsed.hostname.toLowerCase()}:${parsed.port}`;
+}
+
+/** Check if a string looks like an IPv4 address. */
+function isIpv4(s: string): boolean {
+  return /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/.test(s);
+}
+
+/**
+ * Keep only one entry per resolved hostname+port key.
+ * Resolves any unresolved IPs so that multiple IPs of the same machine
+ * (e.g., different NICs) collapse to the same hostname.
+ * Prefers the entry with a resolved hostname over an IP.
+ */
+export async function dedupByHostname(servers: DiscoveredServer[]): Promise<DiscoveredServer[]> {
+  // Resolve any unresolved IPs — reuse dns cache if available
+  const entries = await Promise.all(
+    servers.map(async (server) => {
+      const parsed = new URL(server.baseUrl);
+      const hostname = parsed.hostname;
+      if (isIpv4(hostname)) {
+        const resolved = await resolveHostname(hostname);
+        if (resolved !== hostname) {
+          // Replace only the IP in the original string — preserves whether the
+          // original URL had a trailing slash/path (avoids introducing a
+          // spurious "/" that breaks downstream path concatenation).
+          const escaped = hostname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const re = new RegExp(`^(${parsed.protocol}//)${escaped}(:|/|$)`);
+          const newBaseUrl = server.baseUrl.replace(re, `$1${resolved}$2`);
+          return {
+            ...server,
+            baseUrl: newBaseUrl,
+            label: shortLabel(newBaseUrl, server.kind),
+          };
+        }
+      }
+      return {
+        ...server,
+        label: shortLabel(server.baseUrl, server.kind),
+      };
+    }),
+  );
+
+  // Group by resolved hostname:port
+  const groups = new Map<string, DiscoveredServer[]>();
+  for (const server of entries) {
+    const key = hostPortKey(server.baseUrl);
+    const list = groups.get(key) ?? [];
+    groups.set(key, list);
+    list.push(server);
+  }
+
+  const result: DiscoveredServer[] = [];
+  for (const [_key, group] of groups) {
+    if (group.length === 1) {
+      result.push(group[0]!);
+      continue;
+    }
+    // Prefer resolved hostname over IP
+    const withHostname = group.find(
+      (s) => !isIpv4(new URL(s.baseUrl).hostname) && !new URL(s.baseUrl).hostname.includes("["),
+    );
+    result.push(withHostname ?? group[0]!);
+  }
+  return result;
+}
 
 /** Default localhost ports probed in order (from CAPABILITY-MATRIX.md). */
 export const DEFAULT_PROBE_PORTS: readonly number[] = [
@@ -197,7 +284,21 @@ export async function discoverLocalhost(
     }
   }
 
-  return deduplicated;
+  // Resolve hostnames in parallel — updates both baseUrl and label.
+  const resolved = await Promise.all(
+    deduplicated.map(async (server) => {
+      const newBaseUrl = await resolveUrlHostname(server.baseUrl);
+      if (newBaseUrl === server.baseUrl) return server; // no change
+      return {
+        ...server,
+        baseUrl: newBaseUrl,
+        label: shortLabel(newBaseUrl, server.kind),
+      };
+    }),
+  );
+
+  // Dedup by hostname+port — collapses multiple IPs of the same machine
+  return await dedupByHostname(resolved);
 }
 
 export interface DiscoverLanOptions {
@@ -299,5 +400,19 @@ export async function discoverLan(
     }
   }
 
-  return deduplicated;
+  // Resolve hostnames in parallel — updates both baseUrl and label.
+  const resolved = await Promise.all(
+    deduplicated.map(async (server) => {
+      const newBaseUrl = await resolveUrlHostname(server.baseUrl);
+      if (newBaseUrl === server.baseUrl) return server; // no change
+      return {
+        ...server,
+        baseUrl: newBaseUrl,
+        label: shortLabel(newBaseUrl, server.kind),
+      };
+    }),
+  );
+
+  // Dedup by hostname+port — collapses multiple IPs of the same machine
+  return await dedupByHostname(resolved);
 }
