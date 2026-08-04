@@ -40,6 +40,7 @@ export type BackendKind =
   | "llamacpp"
   | "llamaswap"
   | "vllm"
+  | "omlx"
   | "openai"
   | "anthropic"
   | "tabbyapi"
