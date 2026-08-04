@@ -54,7 +54,7 @@ describe("dedupByHostname", () => {
     const servers = [makeServer("http://workstation.local:8000")];
     const result = await dedupByHostname(servers);
     expect(result).toHaveLength(1);
-    expect(result[0].baseUrl).toBe("http://workstation.local:8000");
+    expect(result[0]!.baseUrl).toBe("http://workstation.local:8000");
   });
 
   it("keeps different hostnames on same port", async () => {
@@ -87,7 +87,7 @@ describe("dedupByHostname", () => {
     const result = await dedupByHostname(servers);
     expect(result).toHaveLength(1);
     // URL constructor adds trailing slash for empty paths
-    expect(result[0].baseUrl.replace(/\/$/, "")).toBe("http://macpro16.fritz.box:8000");
+    expect(result[0]!.baseUrl.replace(/\/$/, "")).toBe("http://macpro16.fritz.box:8000");
   });
 
   it("one IP resolves to hostname — preferred over unresolved IP", async () => {

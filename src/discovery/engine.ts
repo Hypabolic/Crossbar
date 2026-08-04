@@ -57,10 +57,14 @@ export async function dedupByHostname(servers: DiscoveredServer[]): Promise<Disc
       if (isIpv4(hostname)) {
         const resolved = await resolveHostname(hostname);
         if (resolved !== hostname) {
-          // Update the entry with the resolved hostname
+          // Replace only the IP in the original string — preserves whether the
+          // original URL had a trailing slash/path (avoids introducing a
+          // spurious "/" that breaks downstream path concatenation).
+          const escaped = hostname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const re = new RegExp(`^(${parsed.protocol}//)${escaped}(:|/|$)`);
           return {
             ...server,
-            baseUrl: `${parsed.protocol}//${resolved}:${parsed.port}${parsed.pathname}${parsed.search}${parsed.hash}`,
+            baseUrl: server.baseUrl.replace(re, `$1${resolved}$2`),
             label: server.label.replace(hostname, resolved),
           };
         }
@@ -81,14 +85,14 @@ export async function dedupByHostname(servers: DiscoveredServer[]): Promise<Disc
   const result: DiscoveredServer[] = [];
   for (const [_key, group] of groups) {
     if (group.length === 1) {
-      result.push(group[0]);
+      result.push(group[0]!);
       continue;
     }
     // Prefer resolved hostname over IP
     const withHostname = group.find(
       (s) => !isIpv4(new URL(s.baseUrl).hostname) && !new URL(s.baseUrl).hostname.includes("["),
     );
-    result.push(withHostname ?? group[0]);
+    result.push(withHostname ?? group[0]!);
   }
   return result;
 }

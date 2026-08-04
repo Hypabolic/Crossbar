@@ -88,6 +88,11 @@ export async function resolveUrlHostname(url: string): Promise<string> {
   // No change — return original
   if (resolved === hostname) return url;
 
-  // Reconstruct URL with resolved hostname
-  return `${parsed.protocol}//${resolved}:${parsed.port}${parsed.pathname}${parsed.search}${parsed.hash}`;
+  // Replace only the hostname in the original string — preserves whether the
+  // original URL had a trailing slash/path or not (avoids introducing a
+  // spurious "/" that breaks downstream path concatenation, e.g. `${baseUrl}/v1`
+  // becoming a double slash).
+  const hostPattern = hostname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); // escape regex chars
+  const re = new RegExp(`^(${parsed.protocol}//)${hostPattern}(:|/|$)`);
+  return url.replace(re, `$1${resolved}$2`);
 }
