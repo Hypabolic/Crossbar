@@ -3,6 +3,11 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.7.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.7.0) — 2026-08-04
+
+### Documentation
+- V0.6.0 [skip ci] ([fb975a3](https://github.com/Hypabolic/Crossbar/commit/fb975a352d43d703505a41018d50edf3fb6c4a66))
+
 ## [0.6.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.6.0) — 2026-07-13
 
 ### Features
