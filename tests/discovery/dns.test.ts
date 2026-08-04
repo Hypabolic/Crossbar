@@ -7,6 +7,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { reverse } from "node:dns/promises";
+import { readFileSync } from "node:fs";
 
 // ---------------------------------------------------------------------------
 // Mock dns.reverse — real DNS is slow and unreliable in CI
@@ -28,8 +29,17 @@ vi.mock("node:os", async (importOriginal) => {
   };
 });
 
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    readFileSync: vi.fn(actual.readFileSync),
+  };
+});
+
 const mockReverse = vi.mocked(reverse);
 const mockHostname = vi.mocked((await import("node:os")).hostname);
+const mockReadFileSync = vi.mocked(readFileSync);
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -37,13 +47,19 @@ const mockHostname = vi.mocked((await import("node:os")).hostname);
 
 describe("dns resolveHostname", () => {
   beforeEach(() => {
+    vi.resetModules();
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
     // Default: local machine is on .local domain
     mockHostname.mockReturnValue("workstation.local");
+    mockReadFileSync.mockImplementation(() => {
+      throw new Error("ENOENT");
+    });
   });
 
   afterEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it("localhost: returns IP unchanged", async () => {
@@ -112,13 +128,20 @@ describe("dns resolveHostname", () => {
 
 describe("dns resolveUrlHostname", () => {
   beforeEach(async () => {
+    vi.resetModules();
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
+    mockHostname.mockReturnValue("workstation.local");
+    mockReadFileSync.mockImplementation(() => {
+      throw new Error("ENOENT");
+    });
     const { clearCache } = await import("../../src/discovery/dns.ts");
     clearCache();
   });
 
   afterEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it("localhost: returns URL unchanged", async () => {
@@ -187,6 +210,48 @@ describe("dns resolveUrlHostname", () => {
     expect(shortHostname("remote.example.com")).toBe("remote.example.com");
   });
 
+  it("getLocalDomain falls back to USERDNSDOMAIN", async () => {
+    mockHostname.mockReturnValue("workstation");
+    vi.stubEnv("USERDNSDOMAIN", "fritz.box");
+    const { getLocalDomain, shortHostname } = await import("../../src/discovery/dns.ts");
+    expect(getLocalDomain()).toBe(".fritz.box");
+    expect(shortHostname("dagobert.fritz.box")).toBe("dagobert");
+  });
+
+  it("getLocalDomain falls back to LOCALDOMAIN/DOMAIN when hostname is short", async () => {
+    mockHostname.mockReturnValue("workstation");
+    vi.stubEnv("LOCALDOMAIN", "lab.example.org");
+    const { getLocalDomain, shortHostname } = await import("../../src/discovery/dns.ts");
+    expect(getLocalDomain()).toBe(".lab.example.org");
+    expect(shortHostname("gpu01.lab.example.org")).toBe("gpu01");
+  });
+
+  it("getLocalDomain falls back to /etc/resolv.conf search domain", async () => {
+    mockHostname.mockReturnValue("workstation");
+    mockReadFileSync.mockReturnValue("nameserver 1.1.1.1\nsearch fritz.box home.arpa\n");
+    const { getLocalDomain, shortHostname } = await import("../../src/discovery/dns.ts");
+    expect(getLocalDomain()).toBe(".fritz.box");
+    expect(shortHostname("dagobert.fritz.box")).toBe("dagobert");
+  });
+
+  it("getLocalDomain falls back to /etc/resolv.conf domain directive", async () => {
+    mockHostname.mockReturnValue("workstation");
+    mockReadFileSync.mockReturnValue("domain corp.example.net\n");
+    const { getLocalDomain } = await import("../../src/discovery/dns.ts");
+    expect(getLocalDomain()).toBe(".corp.example.net");
+  });
+
+  it("getLocalDomain is robust: env/file failures return null and do not throw", async () => {
+    mockHostname.mockReturnValue("localhost");
+    mockReadFileSync.mockImplementation(() => {
+      throw new Error("permission denied");
+    });
+    const { getLocalDomain, shortHostname } = await import("../../src/discovery/dns.ts");
+    expect(getLocalDomain()).toBeNull();
+    expect(() => shortHostname("dagobert.fritz.box")).not.toThrow();
+    expect(shortHostname("dagobert.fritz.box")).toBe("dagobert.fritz.box");
+  });
+
   it("falls back to original URL on DNS failure", async () => {
     mockReverse.mockRejectedValue(new Error("DNS failed"));
     const { resolveUrlHostname } = await import("../../src/discovery/dns.ts");
@@ -207,5 +272,19 @@ describe("dns resolveUrlHostname", () => {
     await resolveUrlHostname("http://172.16.0.1:11434");
     // Only one DNS call despite two URLs with same IP
     expect(mockReverse).toHaveBeenCalledTimes(1);
+  });
+
+  it("clearCache also clears cached local-domain detection", async () => {
+    mockHostname.mockReturnValue("workstation");
+    vi.stubEnv("USERDNSDOMAIN", "fritz.box");
+    const { getLocalDomain, clearCache } = await import("../../src/discovery/dns.ts");
+    expect(getLocalDomain()).toBe(".fritz.box");
+
+    vi.unstubAllEnvs();
+    vi.stubEnv("USERDNSDOMAIN", "corp.example.com");
+    expect(getLocalDomain()).toBe(".fritz.box");
+
+    clearCache();
+    expect(getLocalDomain()).toBe(".corp.example.com");
   });
 });
