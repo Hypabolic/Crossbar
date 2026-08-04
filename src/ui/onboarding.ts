@@ -31,26 +31,16 @@ import { adapterFor } from "../adapters/index.ts";
 import { registerServer, unregisterServer } from "../shim/provider-shim.ts";
 import { createProbe } from "../discovery/probe.ts";
 import { expandHosts, localSubnetCidrs } from "../discovery/subnet.ts";
-import { shortHostname } from "../discovery/dns.ts";
 import { catalogueChanged } from "../poll.ts";
 import { DEFAULT_PROBE_PORTS, type ProgressCallback } from "../discovery/engine.ts";
 
-/** Status-bar key for the transient "scanning…" indicator shown during discovery scans. */
-const SCAN_STATUS_KEY = "crossbar-scan";
-
 // ─── Pure helpers ────────────────────────────────────────────────────────────
 
-/**
- * Extract a compact `host:port` string from a base URL for UI labels.
- *
- * When the host is in the same domain as the machine Pi is running on, omit the
- * shared domain suffix (e.g. `dagobert.fritz.box` → `dagobert`) to save space.
- */
+/** Extract a `host:port` string from a base URL for compact labels. */
 function hostPortOf(baseUrl: string): string {
   try {
     const u = new URL(baseUrl);
-    const host = shortHostname(u.hostname);
-    return `${host}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
+    return `${u.hostname}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
   } catch {
     return baseUrl.replace(/^https?:\/\//, "");
   }
@@ -1183,13 +1173,9 @@ export async function openOnboarding(
     await ctx.ui.custom<void>(
       (tui, theme, _kb, done) => {
         const abortCtrl = new AbortController();
-        let completed = 0;
-        let total = 0;
 
         const progressCb: ProgressCallback = (c, t, found) => {
-          completed = c;
-          total = t;
-          const pct = total > 0 ? `${Math.round((c / t) * 100)}%` : "…%";
+          const pct = t > 0 ? `${Math.round((c / t) * 100)}%` : "…%";
           loader.setMessage(
             `Crossbar: scanning for model servers… ${pct} — ${found} servers found — ESC to abort`,
           );
@@ -1212,7 +1198,6 @@ export async function openOnboarding(
         container.addChild(loader);
         container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
 
-        // Run scan in background; close overlay when done (loading or success).
         deps
           .discover({ abortSignal: abortCtrl.signal, progress: progressCb })
           .then((models) => {

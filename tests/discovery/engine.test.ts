@@ -221,24 +221,6 @@ describe("discoverLocalhost", () => {
     expect(results).toHaveLength(1);
   });
 
-  it("normalizes labels even when the discovered baseUrl is already a hostname", async () => {
-    const adapter = makeAdapter("llamacpp", async () => ({
-      kind: "llamacpp" as const,
-      baseUrl: "http://devbox:8080",
-      auth: "none" as const,
-      label: "llama.cpp (http://devbox:8080/)",
-      confidence: 0.9,
-    }));
-
-    const results = await discoverLocalhost([adapter], {
-      ports: [8080],
-    });
-
-    expect(results).toHaveLength(1);
-    expect(results[0]!.baseUrl).toBe("http://devbox:8080");
-    expect(results[0]!.label).toBe("llamacpp (devbox:8080)");
-  });
-
   it("discovers multiple servers on different ports", async () => {
     const adapter = makeAdapter("ollama", async (baseUrl) => {
       if (baseUrl === "http://127.0.0.1:11434") {

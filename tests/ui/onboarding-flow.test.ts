@@ -105,11 +105,6 @@ function makeHarness(customResults: unknown[]) {
       notify: vi.fn(),
       input: vi.fn(),
       select: vi.fn(),
-      setStatus: vi.fn(),
-      theme: {
-        fg: (token: string, text: string) => text,
-        bold: (text: string) => text,
-      },
     },
     modelRegistry: {
       find: (provider: string, modelId: string) => {
@@ -197,6 +192,7 @@ describe("openOnboarding navigation and registration", () => {
 
   it("rescans without closing the server selector", async () => {
     const registry = makeRegistry();
+    // Opening no longer auto-scans; only the __rescan__ action invokes discover().
     const discover = vi.fn().mockResolvedValue([server]);
     const { pi, ctx, custom } = makeHarness([
       "__rescan__",
