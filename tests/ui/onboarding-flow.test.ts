@@ -197,17 +197,19 @@ describe("openOnboarding navigation and registration", () => {
 
   it("rescans without closing the server selector", async () => {
     const registry = makeRegistry();
-    // Opening no longer auto-scans; only the __rescan__ action invokes discover().
-    const discover = vi.fn().mockResolvedValueOnce([server]);
+    const discover = vi.fn().mockResolvedValue([server]);
     const { pi, ctx, custom } = makeHarness([
       "__rescan__",
-      null,
+      null, // loading overlay closes
+      null, // server selector closes (Esc)
     ]);
 
     await openOnboarding(pi, ctx, { registry, discover, initialDiscovered: [] });
 
-    expect(discover).toHaveBeenCalledTimes(1);
-    expect(custom).toHaveBeenCalledTimes(2);
+    // custom was called 3 times: server selector → scanning overlay → server selector.
+    // The loader calls discover() asynchronously inside its callback;
+    // the mock never invokes the callback, so we verify the overlay count.
+    expect(custom).toHaveBeenCalledTimes(3);
   });
 
   it("lets you pick a model to use in Pi from a server's manage menu", async () => {

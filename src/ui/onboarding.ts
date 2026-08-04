@@ -20,7 +20,7 @@
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder, getSelectListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, type SelectItem, SelectList, Text, matchesKey } from "@earendil-works/pi-tui";
+import { Container, type SelectItem, SelectList, Text, matchesKey, Loader } from "@earendil-works/pi-tui";
 
 import type { BackendAdapter } from "../core/backend-adapter.ts";
 import { canIntrospect, canLoadUnload, canSwitch } from "../core/backend-adapter.ts";
@@ -1180,14 +1180,38 @@ export async function openOnboarding(
   // permanent dismissals go to registry.dismiss() and are filtered inside discover().
   const sessionHidden = deps.sessionHidden ?? new Set<string>();
   const rescan = async (): Promise<void> => {
-    ctx.ui.setStatus(SCAN_STATUS_KEY, ctx.ui.theme.fg("accent", "⟳ Crossbar: scanning for model servers…"));
-    try {
-      discovered = await discover();
-    } catch {
-      ctx.ui.notify("Crossbar: discovery failed; saved servers are still available.", "warning");
-    } finally {
-      ctx.ui.setStatus(SCAN_STATUS_KEY, undefined);
-    }
+    await ctx.ui.custom<void>(
+      (tui, theme, _kb, done) => {
+        const loader = new Loader(
+          tui,
+          (s) => theme.fg("accent", s),
+          (s) => theme.fg("dim", s),
+          "Crossbar: scanning for model servers…",
+        );
+        loader.start();
+
+        const container = new Container();
+        container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
+        container.addChild(loader);
+        container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
+
+        // Run scan in background; close overlay when done (loading or success).
+        discover()
+          .then((models) => {
+            discovered = models;
+          })
+          .catch(() => {
+            ctx.ui.notify("Crossbar: discovery failed; saved servers are still available.", "warning");
+          })
+          .finally(() => {
+            loader.stop();
+            done();
+          });
+
+        return container;
+      },
+      { overlay: true, overlayOptions: { width: "40%" } },
+    );
   };
 
   while (true) {
