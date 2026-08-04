@@ -17,13 +17,20 @@ import { CLOUD_KINDS } from "../core/capability.ts";
 import type { BackendAdapter } from "../core/backend-adapter.ts";
 import type { DiscoveredServer, Probe } from "../core/types.ts";
 import { createProbe } from "./probe.ts";
-import { resolveUrlHostname, clearCache } from "./dns.ts";
+import { resolveUrlHostname, clearCache, shortHostname } from "./dns.ts";
 
 // ---------------------------------------------------------------------------
 // Dedup helpers
 // ---------------------------------------------------------------------------
 
 import { resolveHostname } from "./dns.ts";
+
+/** Derive a short display name for a server (short hostname + port). */
+function shortLabel(baseUrl: string, kind: string): string {
+  const parsed = new URL(baseUrl);
+  const displayHost = shortHostname(parsed.hostname);
+  return `${kind} (${displayHost}:${parsed.port})`;
+}
 
 /** Extract the hostname+port key from a baseUrl for deduplication. */
 function hostPortKey(baseUrl: string): string {
@@ -62,10 +69,11 @@ export async function dedupByHostname(servers: DiscoveredServer[]): Promise<Disc
           // spurious "/" that breaks downstream path concatenation).
           const escaped = hostname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
           const re = new RegExp(`^(${parsed.protocol}//)${escaped}(:|/|$)`);
+          const newBaseUrl = server.baseUrl.replace(re, `$1${resolved}$2`);
           return {
             ...server,
-            baseUrl: server.baseUrl.replace(re, `$1${resolved}$2`),
-            label: server.label.replace(hostname, resolved),
+            baseUrl: newBaseUrl,
+            label: shortLabel(newBaseUrl, server.kind),
           };
         }
       }
@@ -271,7 +279,7 @@ export async function discoverLocalhost(
       return {
         ...server,
         baseUrl: newBaseUrl,
-        label: server.label.replace(server.baseUrl, newBaseUrl),
+        label: shortLabel(newBaseUrl, server.kind),
       };
     }),
   );
@@ -373,7 +381,7 @@ export async function discoverLan(
       return {
         ...server,
         baseUrl: newBaseUrl,
-        label: server.label.replace(server.baseUrl, newBaseUrl),
+        label: shortLabel(newBaseUrl, server.kind),
       };
     }),
   );
