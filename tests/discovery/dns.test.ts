@@ -149,6 +149,15 @@ describe("dns resolveUrlHostname", () => {
     expect(result.endsWith("/")).toBe(false);
   });
 
+  it("shortHostname strips domain suffix for display", async () => {
+    const { shortHostname } = await import("../../src/discovery/dns.ts");
+    expect(shortHostname("macpro16.fritz.box")).toBe("macpro16");
+    expect(shortHostname("dagobert.home.arpa")).toBe("dagobert");
+    expect(shortHostname("localhost")).toBe("localhost");
+    expect(shortHostname("192.168.1.42")).toBe("192.168.1.42");
+    expect(shortHostname("deep.sub.domain.example.com")).toBe("deep");
+  });
+
   it("falls back to original URL on DNS failure", async () => {
     mockReverse.mockRejectedValue(new Error("DNS failed"));
     const { resolveUrlHostname } = await import("../../src/discovery/dns.ts");

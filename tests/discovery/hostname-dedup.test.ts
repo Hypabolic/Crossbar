@@ -129,4 +129,18 @@ describe("dedupByHostname", () => {
     const result = await dedupByHostname(servers);
     expect(result).toHaveLength(2);
   });
+
+  it("labels use short hostname (domain suffix stripped)", async () => {
+    vi.mocked(await import("node:dns/promises")).reverse.mockResolvedValue(
+      ["macpro16.fritz.box"],
+    );
+    const servers = [
+      makeServer("http://192.168.188.127:8000"),
+    ];
+    const result = await dedupByHostname(servers);
+    expect(result).toHaveLength(1);
+    // Label should show "macpro16" not "macpro16.fritz.box"
+    expect(result[0]!.label).toContain("macpro16:");
+    expect(result[0]!.label).not.toContain(".fritz.box");
+  });
 });

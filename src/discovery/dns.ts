@@ -4,6 +4,10 @@
  * Resolves IP addresses to hostnames via reverse DNS (`dns.reverse()`).
  * Results are cached within a scan run to avoid redundant lookups.
  * Resolution failures fall back to the original value (graceful degradation).
+ *
+ * Hostnames are displayed without their domain suffix (e.g. `macpro16.fritz.box`
+ * → `macpro16`) to save horizontal space in the UI. The full hostname is
+ * preserved in the `baseUrl` for correct DNS resolution.
  */
 
 import { reverse } from "node:dns/promises";
@@ -17,6 +21,23 @@ const cache = new Map<string, string | null>();
 /** Clear the cache between scan runs. */
 export function clearCache(): void {
   cache.clear();
+}
+
+/**
+ * Strip the domain suffix from a hostname for display.
+ *
+ * Examples:
+ *   `macpro16.fritz.box`    → `macpro16`
+ *   `dagobert.home.arpa`    → `dagobert`
+ *   `localhost`             → `localhost` (no dot — no-op)
+ *   `192.168.1.42`          → `192.168.1.42` (IP — no-op)
+ */
+export function shortHostname(hostname: string): string {
+  // Don't strip dots from IP addresses
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) return hostname;
+  if (/^\[?[0-9a-fA-F:]+\]?$/.test(hostname)) return hostname; // IPv6
+  const dotIndex = hostname.indexOf(".");
+  return dotIndex > 0 ? hostname.slice(0, dotIndex) : hostname;
 }
 
 // ---------------------------------------------------------------------------
