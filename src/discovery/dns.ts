@@ -60,14 +60,14 @@ function localDomainFromResolvConf(): string | null {
       if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith(";")) continue;
 
       const searchMatch = trimmed.match(/^search\s+(.+)$/i);
-      if (searchMatch) {
+      if (searchMatch?.[1]) {
         const first = searchMatch[1].split(/\s+/).find((part) => part.length > 0);
         const normalized = first ? normalizeDomain(first) : null;
         if (normalized) return normalized;
       }
 
       const domainMatch = trimmed.match(/^domain\s+(.+)$/i);
-      if (domainMatch) {
+      if (domainMatch?.[1]) {
         const normalized = normalizeDomain(domainMatch[1]);
         if (normalized) return normalized;
       }
