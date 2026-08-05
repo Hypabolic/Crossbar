@@ -20,7 +20,7 @@
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder, getSelectListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, type SelectItem, SelectList, Text, matchesKey } from "@earendil-works/pi-tui";
+import { Container, type SelectItem, SelectList, Text, matchesKey, CancellableLoader } from "@earendil-works/pi-tui";
 
 import type { BackendAdapter } from "../core/backend-adapter.ts";
 import { canIntrospect, canLoadUnload, canSwitch } from "../core/backend-adapter.ts";
@@ -32,7 +32,7 @@ import { registerServer, unregisterServer } from "../shim/provider-shim.ts";
 import { createProbe } from "../discovery/probe.ts";
 import { expandHosts, localSubnetCidrs } from "../discovery/subnet.ts";
 import { catalogueChanged } from "../poll.ts";
-import { DEFAULT_PROBE_PORTS } from "../discovery/engine.ts";
+import { DEFAULT_PROBE_PORTS, type ProgressCallback } from "../discovery/engine.ts";
 
 // ─── Pure helpers ────────────────────────────────────────────────────────────
 
@@ -1074,7 +1074,7 @@ async function openProbePorts(ctx: ExtensionCommandContext, registry: ServerRegi
 
 export interface OnboardingDeps {
   registry: ServerRegistry;
-  discover: () => Promise<DiscoveredServer[]>;
+  discover: (opts?: { abortSignal?: AbortSignal; progress?: ProgressCallback }) => Promise<DiscoveredServer[]>;
   /**
    * Seed the server list with results from a prior scan (startup localhost probe,
    * or the last explicit Rescan). Opening /crossbar shows this immediately and
@@ -1170,12 +1170,56 @@ export async function openOnboarding(
   // permanent dismissals go to registry.dismiss() and are filtered inside discover().
   const sessionHidden = deps.sessionHidden ?? new Set<string>();
   const rescan = async (): Promise<void> => {
-    ctx.ui.notify("Crossbar: scanning for backends…", "info");
-    try {
-      discovered = await discover();
-    } catch {
-      ctx.ui.notify("Crossbar: discovery failed; saved servers are still available.", "warning");
-    }
+    await ctx.ui.custom<void>(
+      (tui, theme, _kb, done) => {
+        const abortCtrl = new AbortController();
+
+        const progressCb: ProgressCallback = (c, t, found) => {
+          const pct = t > 0 ? `${Math.round((c / t) * 100)}%` : "…%";
+          loader.setMessage(
+            `Crossbar: scanning for model servers… ${pct} — ${found} servers found — ESC to abort`,
+          );
+        };
+
+        const loader = new CancellableLoader(
+          tui,
+          (s) => theme.fg("accent", s),
+          (s) => theme.fg("dim", s),
+          "Crossbar: scanning for model servers…",
+        );
+        loader.onAbort = () => {
+          abortCtrl.abort();
+          done();
+        };
+        loader.start();
+
+        const container = new Container();
+        container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
+        container.addChild(loader);
+        container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
+
+        deps
+          .discover({ abortSignal: abortCtrl.signal, progress: progressCb })
+          .then((models) => {
+            discovered = models;
+            done();
+          })
+          .catch((err) => {
+            if (err?.name === "AbortError") {
+              ctx.ui.notify("Crossbar: scan aborted.", "info");
+            } else {
+              ctx.ui.notify("Crossbar: discovery failed; saved servers are still available.", "warning");
+            }
+            done();
+          })
+          .finally(() => {
+            loader.stop();
+          });
+
+        return container;
+      },
+      { overlay: true, overlayOptions: { width: "40%" } },
+    );
   };
 
   while (true) {
