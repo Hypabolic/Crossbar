@@ -3,13 +3,31 @@
 All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-## [0.7.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.7.0) — 2026-08-04
+## [0.8.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.8.0) — 2026-08-17
 
 ### Features
-- Add dedicated oMLX adapter for Apple Silicon LLM servers (`owned_by: "omlx"`), with correct `max_model_len` → context window mapping, load/switch, and thinking capability parsing ([#20](https://github.com/Hypabolic/Crossbar/pull/20)) ([60b05a3](https://github.com/Hypabolic/Crossbar/commit/60b05a3f794e64793bc72f1f52680693c859721a))
+- Shorten same-domain LAN hostnames in /crossbar and dedup by resolved hostname ([933c335](https://github.com/Hypabolic/Crossbar/commit/933c3352d46dec38e17087f1607081d96d23411f))
+- Shorten server labels by stripping domain suffix ([828ee66](https://github.com/Hypabolic/Crossbar/commit/828ee668c1d9c461b063b8467f2bd21e6557f1ba))
+- Resolve IPs to hostnames during discovery + dedup by hostname ([3ef11dd](https://github.com/Hypabolic/Crossbar/commit/3ef11ddba68221b94543402fc10648a17f17f5f5))
+- Animated scan progress indicator during /crossbar rescan ([b600272](https://github.com/Hypabolic/Crossbar/commit/b6002720893318140367f0d9e731c1ed8cc42568))
 
 ### Bug Fixes
-- oMLX servers no longer show a hardcoded 8k ctx when advertising larger windows (e.g. 65536) ([#19](https://github.com/Hypabolic/Crossbar/issues/19), fixed by [#20](https://github.com/Hypabolic/Crossbar/pull/20))
+- Clear DNS cache per scan and align hostname docs with behavior ([929b48a](https://github.com/Hypabolic/Crossbar/commit/929b48a955a1c9d94e9ddf8744c8be408e5889c7))
+- Guard against undefined regex capture group in resolv.conf parsing ([962ecfd](https://github.com/Hypabolic/Crossbar/commit/962ecfddf28f73408f637d6aae78d34cccd9f630))
+- Hostname resolution was adding spurious trailing slash to baseUrl ([8784398](https://github.com/Hypabolic/Crossbar/commit/8784398471b9004d8c6630e7fbacb0d60bdcc0f7))
+- Remove no-auth servers without error (#27) ([40dfddb](https://github.com/Hypabolic/Crossbar/commit/40dfddb45e8a52ff0d7a417e282f897e81fb2422))
+
+### Documentation
+- Flesh out v0.7.0 entry [skip ci] ([9915887](https://github.com/Hypabolic/Crossbar/commit/99158870538f54bbf838822e732c81be65d09263))
+- V0.7.0 [skip ci] ([97d7619](https://github.com/Hypabolic/Crossbar/commit/97d761972b29462476ce4d4e603a0593eac63aaa))
+
+### Testing
+- Replace real hostnames with generic test names ([ff1a582](https://github.com/Hypabolic/Crossbar/commit/ff1a5825ad97201ef8f581210429b1e70ae38039))
+
+## [0.7.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.7.0) — 2026-08-04
+
+### Documentation
+- V0.6.0 [skip ci] ([fb975a3](https://github.com/Hypabolic/Crossbar/commit/fb975a352d43d703505a41018d50edf3fb6c4a66))
 
 ## [0.6.0](https://github.com/Hypabolic/Crossbar/releases/tag/v0.6.0) — 2026-07-13
 
