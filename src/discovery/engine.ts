@@ -17,13 +17,11 @@ import { CLOUD_KINDS } from "../core/capability.ts";
 import type { BackendAdapter } from "../core/backend-adapter.ts";
 import type { DiscoveredServer, Probe } from "../core/types.ts";
 import { createProbe } from "./probe.ts";
-import { resolveUrlHostname, clearCache, shortHostname } from "./dns.ts";
+import { clearCache, resolveHostname, resolveUrlHostname, shortHostname } from "./dns.ts";
 
 // ---------------------------------------------------------------------------
 // Dedup helpers
 // ---------------------------------------------------------------------------
-
-import { resolveHostname } from "./dns.ts";
 
 /** Derive a short display name for a server (short hostname + port). */
 function shortLabel(baseUrl: string, kind: string): string {
@@ -53,12 +51,17 @@ function isIpv4(s: string): boolean {
  * Resolves any unresolved IPs so that multiple IPs of the same machine
  * (e.g., different NICs) collapse to the same hostname.
  * Prefers the entry with a resolved hostname over an IP.
+ *
+ * Note: loopback (`localhost` / `127.0.0.1`) and a LAN hostname for the same
+ * machine stay as separate keys — callers that merge localhost + LAN scans
+ * (e.g. `/crossbar`) already prefer the localhost row via origin-based merge
+ * order when baseUrls collide after resolution; when they do not collide, both
+ * remain visible.
  */
 export async function dedupByHostname(servers: DiscoveredServer[]): Promise<DiscoveredServer[]> {
   // Resolve any unresolved IPs — reuse dns cache if available
   const entries = await Promise.all(
     servers.map(async (server) => {
-      const key = hostPortKey(server.baseUrl);
       const parsed = new URL(server.baseUrl);
       const hostname = parsed.hostname;
       if (isIpv4(hostname)) {
@@ -247,6 +250,8 @@ export async function discoverLocalhost(
   adapters: BackendAdapter[],
   opts?: DiscoverLocalhostOptions,
 ): Promise<DiscoveredServer[]> {
+  clearCache();
+
   const ports = opts?.ports ?? DEFAULT_PROBE_PORTS;
   const host = opts?.host ?? DEFAULT_HOST;
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -339,6 +344,8 @@ export async function discoverLan(
   opts?: DiscoverLanOptions,
 ): Promise<DiscoveredServer[]> {
   if (hosts.length === 0) return [];
+
+  clearCache();
 
   const ports = opts?.ports ?? DEFAULT_PROBE_PORTS;
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;

@@ -6,22 +6,26 @@ A single inference server with multiple network interfaces appears as **multiple
 entries** in the Crossbar server list:
 
 ```
-oMLX (127.0.0.1:8000)              — loopback
 oMLX (192.168.188.127:8000)        — WiFi NIC
 oMLX (192.168.139.3:8000)          — VPN/virtual NIC
 oMLX (workstation.local:8000)     — hostname
 ```
 
-All four entries point to the **same machine**. The user sees four identical
-servers and must manually disable three of them.
+All three LAN entries point to the **same machine**. The user sees duplicate
+servers and must manually ignore the extras.
 
 ## Solution
 
 1. **Resolve** IP addresses to hostnames via reverse DNS.
 2. **Deduplicate** by `hostname + port` — collapse all IPs of the same machine
    into a single entry.
-3. **Prefer localhost** when Crossbar and the server are co-located.
-4. **Prefer hostname** when they are on different machines.
+3. **Prefer hostname** over a still-unresolved IP when both land in the same group.
+4. **Shorten labels** by stripping the shared local domain suffix for display.
+
+Loopback (`127.0.0.1` / `localhost`) is a different key from a LAN hostname, so a
+co-located server can still appear twice (once from the localhost sweep, once from
+LAN) when both paths discover it. That is intentional: the URLs differ, and the
+localhost entry is the better default for a local session.
 
 ## How it works
 
@@ -31,125 +35,40 @@ Each discovered IP is looked up via `dns.reverse()`:
 
 | IP | Resolves to |
 |---|---|
-| `127.0.0.1` | `localhost` (no lookup needed) |
+| `127.0.0.1` | `127.0.0.1` (no lookup) |
 | `192.168.188.127` | `workstation.local` |
 | `192.168.139.3` | `workstation.local` |
-| `192.168.188.173` | `devbox.local` |
 
-**Caching:** Results are cached within a single scan run to avoid redundant
-DNS calls. `clearCache()` is called between scans.
+**Caching:** Results are cached within a single `discoverLocalhost` /
+`discoverLan` call. `clearCache()` runs at the start of each call.
 
 **Graceful fallback:** If reverse DNS fails, the original IP is retained.
 
 ### Step 2 — Dedup by hostname + port
 
 Servers are grouped by their resolved `hostname:port` key. For each group with
-more than one entry, we pick one using the rules below.
-
-### Step 3 — Best endpoint selection
-
-**Case A: Co-located** (Crossbar runs on the same machine as the server)
-
-Both `localhost` and the hostname/IP are discovered. **Prefer `localhost`:**
-
-| Before | After |
-|---|---|
-| `localhost:8000` | `localhost:8000` ✓ |
-| `workstation.local:8000` | _(removed)_ |
-| `192.168.188.127:8000` | _(removed)_ |
-
-**Detection:** Crossbar checks its own hostname/IP against the discovered
-servers. If a server resolves to the same host as Crossbar itself, they are
-co-located.
-
-**Why:** localhost is faster (no network stack), more reliable (no NIC issues),
-and more secure (port not exposed on the network).
-
-**Case B: Remote** (Crossbar runs on a different machine)
-
-Only the hostname/IP are discovered — `localhost` is not in the list.
-**Use the hostname:**
-
-| Before | After |
-|---|---|
-| `devbox.local:8080` | `devbox:8080` ✓ |
-
-**Why:** the OS DNS resolver picks the best route based on interface metrics,
-subnet affinity, and interface state.
+more than one entry, the entry with a resolved hostname is preferred over an IP.
 
 ### Label shortening
 
 Hostnames are displayed **without their domain suffix** to save horizontal
 space in the UI. This only applies to hostnames that share the same domain
-suffix as the machine Crossbar is running on (detected via `os.hostname()`).
+suffix as the machine Crossbar is running on (via `os.hostname()`, env hints, or
+`/etc/resolv.conf`).
 
 | Local machine | Displayed label | Full hostname (baseUrl) |
 |---|---|---|
-| `local-host.local` | `devbox:8080` | `devbox.local` |
-| `local-host.local` | `remote.example.com:8080` | `remote.example.com` |
-| `local-host.local` | `192.168.188.173:8080` | `192.168.188.173` |
+| `local-host.fritz.box` | `devbox:8080` | `devbox.fritz.box` |
+| `local-host.fritz.box` | `remote.example.com:8080` | `remote.example.com` |
+| `local-host.fritz.box` | `192.168.188.173:8080` | `192.168.188.173` |
 
-**Why:**
-- Same-domain: short label saves space, no collision risk
-- Different-domain: full hostname avoids label collisions (e.g. two servers
-  both called `workstation` on different domains)
+### URL path preservation
 
-### Implementation details
-
-#### URL path preservation
-
-We use **string replacement** (not `URL` object reconstruction) to replace
-hostnames in URLs. This preserves the original path, query string, and hash
-exactly, including whether a trailing slash was present.
-
-```typescript
-// Correct: replaces only the hostname in the original string
-const re = new RegExp(`^(${parsed.protocol}//)${escaped}(:|/|$)`);
-return url.replace(re, `$1${resolved}$2`);
-
-// WRONG: URL object adds trailing slash even when the original had none
-`${parsed.protocol}//${resolved}:${parsed.port}${parsed.pathname}${parsed.search}${parsed.hash}`
-//  → "http://hostname:8080/"  (trailing slash breaks ${baseUrl}/v1)
-```
-
-#### Edge cases
-
-| Scenario | Behavior |
-|---|---|
-| IP that resolves to same hostname as another IP | Collapsed to one entry |
-| Different hostnames, same port | Kept as separate entries |
-| Same hostname, different ports | Kept as separate entries |
-| `localhost` + hostname (co-located) | Prefer `localhost` |
-| `localhost` + hostname (remote) | Only hostname appears (localhost not discovered) |
-| Unresolvable IP | Kept as raw IP (graceful degradation) |
-| All IPs in a group unresolved, different | First in each group kept |
-| Malformed URL | Returned as-is (no change) |
-| IPv6 addresses | Skipped (no-op, treated as hostname) |
+Hostname replacement uses string replacement (not `URL` reconstruction) so
+trailing slashes and paths are preserved — reconstructing via `URL` can introduce
+a spurious `/` that breaks `${baseUrl}/v1` concatenation.
 
 ## Testing
 
-### DNS resolution tests (`tests/discovery/dns.test.ts`)
-
-17 tests covering:
-- `resolveHostname`: skip localhost/IPv6, IP→hostname, DNS failure fallback,
-  caching, `clearCache`
-- `resolveUrlHostname`: skip localhost/127.0.0.1, IP→hostname in URL,
-  preserves path/query/hash, **trailing-slash regression**, DNS failure
-  fallback, malformed URL fallback, cross-URL caching
-
-### Deduplication tests (`tests/discovery/hostname-dedup.test.ts`)
-
-7 tests covering:
-- Single entry unchanged
-- Different hostnames kept separate
-- Same hostname, different ports kept separate
-- Multiple IPs → same hostname → collapses to one
-- One IP resolves → preferred over unresolved IP
-- All IPs unresolved → keeps first in group
-- localhost + hostname → separate keys
-
-### Integration
-
-The `dedupByHostname()` function is called in both `discoverLocalhost()` and
-`discoverLan()` after the initial port-based deduplication, ensuring consistent
-behaviour across all discovery paths.
+- `tests/discovery/dns.test.ts` — resolve, shorten, cache, resolv.conf fallback
+- `tests/discovery/hostname-dedup.test.ts` — multi-NIC collapse, preference, labels

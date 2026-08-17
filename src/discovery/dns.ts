@@ -146,9 +146,11 @@ export function shortHostname(hostname: string): string {
 
   // Only shorten if the hostname shares our local domain suffix (case-insensitive)
   const lowerHost = hostname.toLowerCase();
-  if (!lowerHost.endsWith(localDomain.toLowerCase())) return hostname;
+  const lowerDomain = localDomain.toLowerCase();
+  if (!lowerHost.endsWith(lowerDomain)) return hostname;
 
-  return hostname.slice(0, hostname.indexOf("."));
+  // Strip the shared suffix, keeping any subdomain labels (a.b.example → a.b).
+  return hostname.slice(0, hostname.length - localDomain.length);
 }
 
 // ---------------------------------------------------------------------------
