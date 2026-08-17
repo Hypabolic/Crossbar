@@ -1,0 +1,290 @@
+/**
+ * Unit tests for the DNS hostname resolution module.
+ *
+ * Tests resolveHostname(), resolveUrlHostname(), and caching behaviour.
+ * Real DNS lookups are avoided by mocking node:dns/promises.
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { reverse } from "node:dns/promises";
+import { readFileSync } from "node:fs";
+
+// ---------------------------------------------------------------------------
+// Mock dns.reverse — real DNS is slow and unreliable in CI
+// ---------------------------------------------------------------------------
+
+vi.mock("node:dns/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:dns/promises")>();
+  return {
+    ...actual,
+    reverse: vi.fn(actual.reverse),
+  };
+});
+
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return {
+    ...actual,
+    hostname: vi.fn(actual.hostname),
+  };
+});
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    readFileSync: vi.fn(actual.readFileSync),
+  };
+});
+
+const mockReverse = vi.mocked(reverse);
+const mockHostname = vi.mocked((await import("node:os")).hostname);
+const mockReadFileSync = vi.mocked(readFileSync);
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe("dns resolveHostname", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.unstubAllEnvs();
+    // Default: local machine is on .local domain
+    mockHostname.mockReturnValue("workstation.local");
+    mockReadFileSync.mockImplementation(() => {
+      throw new Error("ENOENT");
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it("localhost: returns IP unchanged", async () => {
+    const { resolveHostname } = await import("../../src/discovery/dns.ts");
+    expect(await resolveHostname("localhost")).toBe("localhost");
+    expect(mockReverse).not.toHaveBeenCalled();
+  });
+
+  it("127.0.0.1: returns IP unchanged", async () => {
+    const { resolveHostname } = await import("../../src/discovery/dns.ts");
+    expect(await resolveHostname("127.0.0.1")).toBe("127.0.0.1");
+    expect(mockReverse).not.toHaveBeenCalled();
+  });
+
+  it("IPv6: returns IP unchanged", async () => {
+    const { resolveHostname } = await import("../../src/discovery/dns.ts");
+    expect(await resolveHostname("::1")).toBe("::1");
+    expect(mockReverse).not.toHaveBeenCalled();
+  });
+
+  it("IPv6 full address: returns IP unchanged", async () => {
+    const { resolveHostname } = await import("../../src/discovery/dns.ts");
+    expect(await resolveHostname("2001:db8::1")).toBe("2001:db8::1");
+    expect(mockReverse).not.toHaveBeenCalled();
+  });
+
+  it("resolves a real IP to hostname", async () => {
+    mockReverse.mockResolvedValue(["workstation.local"]);
+    const { resolveHostname } = await import("../../src/discovery/dns.ts");
+    expect(await resolveHostname("192.168.1.42")).toBe("workstation.local");
+    expect(mockReverse).toHaveBeenCalledWith("192.168.1.42");
+  });
+
+  it("falls back to original IP on DNS failure", async () => {
+    mockReverse.mockRejectedValue(new Error("DNS lookup failed"));
+    const { resolveHostname } = await import("../../src/discovery/dns.ts");
+    expect(await resolveHostname("10.0.0.5")).toBe("10.0.0.5");
+  });
+
+  it("falls back to original IP when reverse returns empty array", async () => {
+    mockReverse.mockResolvedValue([]);
+    const { resolveHostname } = await import("../../src/discovery/dns.ts");
+    expect(await resolveHostname("10.0.0.5")).toBe("10.0.0.5");
+  });
+
+  it("caches result — second call with same IP returns cached value", async () => {
+    mockReverse.mockResolvedValue(["cache-test.local"]);
+    const { resolveHostname } = await import("../../src/discovery/dns.ts");
+    expect(await resolveHostname("172.16.0.1")).toBe("cache-test.local");
+    expect(mockReverse).toHaveBeenCalledTimes(1);
+    // Second call should reuse cache — no additional DNS call
+    expect(await resolveHostname("172.16.0.1")).toBe("cache-test.local");
+    expect(mockReverse).toHaveBeenCalledTimes(1);
+  });
+
+  it("clearCache clears the internal cache", async () => {
+    mockReverse.mockResolvedValue(["first.local"]);
+    const { resolveHostname, clearCache } = await import("../../src/discovery/dns.ts");
+    expect(await resolveHostname("10.1.1.1")).toBe("first.local");
+    clearCache();
+    mockReverse.mockResolvedValue(["second.local"]);
+    expect(await resolveHostname("10.1.1.1")).toBe("second.local");
+    expect(mockReverse).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("dns resolveUrlHostname", () => {
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.unstubAllEnvs();
+    mockHostname.mockReturnValue("workstation.local");
+    mockReadFileSync.mockImplementation(() => {
+      throw new Error("ENOENT");
+    });
+    const { clearCache } = await import("../../src/discovery/dns.ts");
+    clearCache();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it("localhost: returns URL unchanged", async () => {
+    const { resolveUrlHostname } = await import("../../src/discovery/dns.ts");
+    expect(await resolveUrlHostname("http://localhost:8000/v1")).toBe(
+      "http://localhost:8000/v1",
+    );
+    expect(mockReverse).not.toHaveBeenCalled();
+  });
+
+  it("127.0.0.1: returns URL unchanged", async () => {
+    const { resolveUrlHostname } = await import("../../src/discovery/dns.ts");
+    expect(await resolveUrlHostname("http://127.0.0.1:11434")).toBe(
+      "http://127.0.0.1:11434",
+    );
+    expect(mockReverse).not.toHaveBeenCalled();
+  });
+
+  it("resolves IP in URL to hostname", async () => {
+    mockReverse.mockResolvedValue(["workstation.local"]);
+    const { resolveUrlHostname } = await import("../../src/discovery/dns.ts");
+    // URL constructor adds trailing slash for paths; normalize in comparison
+    const result = await resolveUrlHostname("http://192.168.1.42:11434");
+    expect(result).toMatch(/^http:\/\/workstation\.local:11434(\/)?$/);
+  });
+
+  it("preserves path, query, and hash", async () => {
+    mockReverse.mockResolvedValue(["dev.local"]);
+    const { resolveUrlHostname } = await import("../../src/discovery/dns.ts");
+    const result = await resolveUrlHostname("http://10.0.0.5:8000/v1/models?key=val#top");
+    expect(result).toBe("http://dev.local:8000/v1/models?key=val#top");
+  });
+
+  it("does not add a trailing slash when the original URL has none (regression)", async () => {
+    mockReverse.mockResolvedValue(["devbox.local"]);
+    const { resolveUrlHostname } = await import("../../src/discovery/dns.ts");
+    const result = await resolveUrlHostname("http://192.168.188.173:8080");
+    expect(result).toBe("http://devbox.local:8080");
+    expect(result.endsWith("/")).toBe(false);
+  });
+
+  it("shortHostname strips domain suffix for same-domain hostnames", async () => {
+    const { shortHostname } = await import("../../src/discovery/dns.ts");
+    // Local machine is on .local
+    expect(shortHostname("workstation.local")).toBe("workstation");
+    expect(shortHostname("devbox.local")).toBe("devbox");
+  });
+
+  it("shortHostname keeps full hostname for different domains", async () => {
+    const { shortHostname } = await import("../../src/discovery/dns.ts");
+    // Local machine is on .local
+    expect(shortHostname("remote.example.com")).toBe("remote.example.com");
+    expect(shortHostname("vpn-server.corp.net")).toBe("vpn-server.corp.net");
+  });
+
+  it("shortHostname skips IPs and localhost", async () => {
+    const { shortHostname } = await import("../../src/discovery/dns.ts");
+    expect(shortHostname("192.168.1.42")).toBe("192.168.1.42");
+    expect(shortHostname("localhost")).toBe("localhost");
+  });
+
+  it("shortHostname with no local domain — no shortening", async () => {
+    mockHostname.mockReturnValue("localhost");
+    const { shortHostname } = await import("../../src/discovery/dns.ts");
+    expect(shortHostname("workstation.local")).toBe("workstation.local");
+    expect(shortHostname("remote.example.com")).toBe("remote.example.com");
+  });
+
+  it("getLocalDomain falls back to USERDNSDOMAIN", async () => {
+    mockHostname.mockReturnValue("workstation");
+    vi.stubEnv("USERDNSDOMAIN", "fritz.box");
+    const { getLocalDomain, shortHostname } = await import("../../src/discovery/dns.ts");
+    expect(getLocalDomain()).toBe(".fritz.box");
+    expect(shortHostname("dagobert.fritz.box")).toBe("dagobert");
+  });
+
+  it("getLocalDomain falls back to LOCALDOMAIN/DOMAIN when hostname is short", async () => {
+    mockHostname.mockReturnValue("workstation");
+    vi.stubEnv("LOCALDOMAIN", "lab.example.org");
+    const { getLocalDomain, shortHostname } = await import("../../src/discovery/dns.ts");
+    expect(getLocalDomain()).toBe(".lab.example.org");
+    expect(shortHostname("gpu01.lab.example.org")).toBe("gpu01");
+  });
+
+  it("getLocalDomain falls back to /etc/resolv.conf search domain", async () => {
+    mockHostname.mockReturnValue("workstation");
+    mockReadFileSync.mockReturnValue("nameserver 1.1.1.1\nsearch fritz.box home.arpa\n");
+    const { getLocalDomain, shortHostname } = await import("../../src/discovery/dns.ts");
+    expect(getLocalDomain()).toBe(".fritz.box");
+    expect(shortHostname("dagobert.fritz.box")).toBe("dagobert");
+  });
+
+  it("getLocalDomain falls back to /etc/resolv.conf domain directive", async () => {
+    mockHostname.mockReturnValue("workstation");
+    mockReadFileSync.mockReturnValue("domain corp.example.net\n");
+    const { getLocalDomain } = await import("../../src/discovery/dns.ts");
+    expect(getLocalDomain()).toBe(".corp.example.net");
+  });
+
+  it("getLocalDomain is robust: env/file failures return null and do not throw", async () => {
+    mockHostname.mockReturnValue("localhost");
+    mockReadFileSync.mockImplementation(() => {
+      throw new Error("permission denied");
+    });
+    const { getLocalDomain, shortHostname } = await import("../../src/discovery/dns.ts");
+    expect(getLocalDomain()).toBeNull();
+    expect(() => shortHostname("dagobert.fritz.box")).not.toThrow();
+    expect(shortHostname("dagobert.fritz.box")).toBe("dagobert.fritz.box");
+  });
+
+  it("falls back to original URL on DNS failure", async () => {
+    mockReverse.mockRejectedValue(new Error("DNS failed"));
+    const { resolveUrlHostname } = await import("../../src/discovery/dns.ts");
+    expect(await resolveUrlHostname("http://10.0.0.5:8000")).toBe(
+      "http://10.0.0.5:8000",
+    );
+  });
+
+  it("malformed URL returns original", async () => {
+    const { resolveUrlHostname } = await import("../../src/discovery/dns.ts");
+    expect(await resolveUrlHostname("not-a-url")).toBe("not-a-url");
+  });
+
+  it("caches hostname resolution across multiple URLs", async () => {
+    mockReverse.mockResolvedValue(["shared.local"]);
+    const { resolveUrlHostname } = await import("../../src/discovery/dns.ts");
+    await resolveUrlHostname("http://172.16.0.1:8000");
+    await resolveUrlHostname("http://172.16.0.1:11434");
+    // Only one DNS call despite two URLs with same IP
+    expect(mockReverse).toHaveBeenCalledTimes(1);
+  });
+
+  it("clearCache also clears cached local-domain detection", async () => {
+    mockHostname.mockReturnValue("workstation");
+    vi.stubEnv("USERDNSDOMAIN", "fritz.box");
+    const { getLocalDomain, clearCache } = await import("../../src/discovery/dns.ts");
+    expect(getLocalDomain()).toBe(".fritz.box");
+
+    vi.unstubAllEnvs();
+    vi.stubEnv("USERDNSDOMAIN", "corp.example.com");
+    expect(getLocalDomain()).toBe(".fritz.box");
+
+    clearCache();
+    expect(getLocalDomain()).toBe(".corp.example.com");
+  });
+});

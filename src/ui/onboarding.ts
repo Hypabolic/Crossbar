@@ -31,16 +31,23 @@ import { adapterFor } from "../adapters/index.ts";
 import { registerServer, unregisterServer } from "../shim/provider-shim.ts";
 import { createProbe } from "../discovery/probe.ts";
 import { expandHosts, localSubnetCidrs } from "../discovery/subnet.ts";
+import { shortHostname } from "../discovery/dns.ts";
 import { catalogueChanged } from "../poll.ts";
 import { DEFAULT_PROBE_PORTS, type ProgressCallback } from "../discovery/engine.ts";
 
 // ─── Pure helpers ────────────────────────────────────────────────────────────
 
-/** Extract a `host:port` string from a base URL for compact labels. */
+/**
+ * Extract a compact `host:port` string from a base URL for UI labels.
+ *
+ * When the host is in the same domain as the machine Pi is running on, omit the
+ * shared domain suffix (e.g. `dagobert.fritz.box` → `dagobert`) to save space.
+ */
 function hostPortOf(baseUrl: string): string {
   try {
     const u = new URL(baseUrl);
-    return `${u.hostname}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
+    const host = shortHostname(u.hostname);
+    return `${host}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
   } catch {
     return baseUrl.replace(/^https?:\/\//, "");
   }
