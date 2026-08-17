@@ -92,7 +92,11 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
   //
   // `includeLan` defaults true (the /crossbar path). Startup passes false so the slow
   // LAN sweep never blocks first paint — LAN servers are surfaced in /crossbar instead.
-  const discover = async (opts?: { includeLan?: boolean }): Promise<DiscoveredServer[]> => {
+  const discover = async (opts?: {
+    includeLan?: boolean;
+    abortSignal?: AbortSignal;
+    progress?: (completed: number, total: number, serversFound: number) => void;
+  }): Promise<DiscoveredServer[]> => {
     const adapters = [...DISCOVERY_ADAPTERS];
     const settings = registry?.getSettings();
     const ports =
@@ -104,8 +108,12 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
     const keep = (list: DiscoveredServer[]): DiscoveredServer[] =>
       reg ? list.filter((s) => !reg.isDismissed(s.baseUrl)) : list;
 
-    const local = await discoverLocalhost(adapters, ports ? { ports } : undefined);
-    if (opts?.includeLan === false || !settings?.lanDiscovery) {
+    const localOpts: Parameters<typeof discoverLocalhost>[1] = {};
+    if (ports) localOpts.ports = ports;
+    if (opts?.abortSignal) localOpts.signal = opts.abortSignal;
+    if (opts?.progress) localOpts.progress = opts.progress;
+    const local = await discoverLocalhost(adapters, localOpts);
+    if (opts?.abortSignal?.aborted || opts?.includeLan === false || !settings?.lanDiscovery) {
       return keep(local);
     }
 
@@ -121,12 +129,15 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
     // per-probe timeout (LAN RTT is tiny). `livenessFirst` makes each dead address
     // cost a single socket, so the high concurrency stays within fd limits and the
     // whole /24 finishes in a few seconds.
-    const lan = await discoverLan(adapters, hosts, {
-      ...(ports ? { ports } : {}),
+    const lanOpts: Parameters<typeof discoverLan>[2] = {
       concurrency: 128,
       timeoutMs: 400,
       livenessFirst: true,
-    });
+    };
+    if (ports) lanOpts.ports = ports;
+    if (opts?.abortSignal) lanOpts.signal = opts.abortSignal;
+    if (opts?.progress) lanOpts.progress = opts.progress;
+    const lan = await discoverLan(adapters, hosts, lanOpts);
     const seen = new Set(local.map((s) => s.baseUrl));
     return keep([...local, ...lan.filter((s) => !seen.has(s.baseUrl))]);
   };
@@ -271,8 +282,8 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
     try {
       await openOnboarding(pi, ctx, {
         registry,
-        discover: async () => {
-          lastDiscovered = await discover();
+        discover: async (dOpts) => {
+          lastDiscovered = await discover(dOpts);
           return lastDiscovered;
         },
         initialDiscovered: lastDiscovered,

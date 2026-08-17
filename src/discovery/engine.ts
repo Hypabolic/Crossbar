@@ -129,6 +129,10 @@ export async function probeOrigin(
 // Public API
 // ────────────────────────────────────────────────────────────────────────────────
 
+export interface ProgressCallback {
+  (completed: number, total: number, serversFound: number): void;
+}
+
 export interface DiscoverLocalhostOptions {
   /** Override the default probe ports. */
   ports?: number[];
@@ -138,6 +142,8 @@ export interface DiscoverLocalhostOptions {
   timeoutMs?: number;
   /** Abort signal to cancel a sweep in progress. */
   signal?: AbortSignal;
+  /** Called after each origin is probed with (completed, total, serversFound). */
+  progress?: ProgressCallback;
   /** Override how the per-origin Probe is built (tests inject a fake probe here). */
   probeFactory?: ProbeFactory;
 }
@@ -165,9 +171,17 @@ export async function discoverLocalhost(
   const origins = ports.map((port) => normalizeOrigin("http:", host, port));
 
   // Build per-origin tasks for bounded concurrency
+  let completed = 0;
+  let serversFound = 0;
+  const total = origins.length;
+  const progress = opts?.progress;
   const tasks = origins.map((origin) => async (): Promise<DiscoveredServer | null> => {
     if (signal?.aborted) return null;
-    return probeOrigin(origin, localAdapters, timeoutMs, opts?.probeFactory);
+    const result = await probeOrigin(origin, localAdapters, timeoutMs, opts?.probeFactory);
+    if (result !== null) serversFound++;
+    completed++;
+    progress?.(completed, total, serversFound);
+    return result;
   });
 
   const allMatches = await runBounded(tasks, DEFAULT_CONCURRENCY);
@@ -204,6 +218,8 @@ export interface DiscoverLanOptions {
   livenessFirst?: boolean;
   /** Abort signal to cancel a sweep in progress. */
   signal?: AbortSignal;
+  /** Called after each origin is probed with (completed, total, serversFound). */
+  progress?: ProgressCallback;
   /** Override how the per-origin Probe is built (tests inject a fake probe here). */
   probeFactory?: ProbeFactory;
 }
@@ -239,6 +255,10 @@ export async function discoverLan(
     }
   }
 
+  const total = origins.length;
+  let lanCompleted = 0;
+  let lanServersFound = 0;
+  const lanProgress = opts?.progress;
   const tasks = origins.map((origin) => async (): Promise<DiscoveredServer | null> => {
     if (signal?.aborted) return null;
     // Liveness gate: for a wide subnet sweep, most addresses are dead. A single
@@ -254,9 +274,17 @@ export async function discoverLan(
       } catch {
         alive = false;
       }
-      if (!alive) return null;
+      if (!alive) {
+        lanCompleted++;
+        lanProgress?.(lanCompleted, total, lanServersFound);
+        return null;
+      }
     }
-    return probeOrigin(origin, localAdapters, timeoutMs, opts?.probeFactory);
+    const result = await probeOrigin(origin, localAdapters, timeoutMs, opts?.probeFactory);
+    if (result !== null) lanServersFound++;
+    lanCompleted++;
+    lanProgress?.(lanCompleted, total, lanServersFound);
+    return result;
   });
 
   const allMatches = await runBounded(tasks, concurrency);
