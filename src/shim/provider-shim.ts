@@ -12,8 +12,22 @@
  * Pi documents this explicitly for local models: the API key is required by Pi,
  * but local OpenAI-compatible servers ignore it, so any value works.
  *
- * - Keyed server: use the `$ENV` sentinel. Pi reads the real key from auth.json
- *   first, so no plaintext secret is stored in ProviderConfig.
+ * - Keyed server: use the `$ENV` sentinel, where the env var name is
+ *   `envVarFor(record.id)`. `registerServer()` below is responsible for setting
+ *   that exact `process.env` entry to the real key (resolved via the registry's
+ *   CredentialStore, ultimately backed by auth.json) immediately before calling
+ *   `pi.registerProvider` — Pi's own config-value resolver
+ *   (`resolveConfigValue`) reads live `process.env`, with no separate lookup of
+ *   auth.json BY PROVIDER ID for extension-registered providers. An earlier
+ *   version of this comment assumed Pi did that auth.json lookup itself for any
+ *   provider id, built-in or extension; that turned out to be true only for
+ *   Pi's own BUILT-IN providers (driven by its internal `ModelRuntime`, see
+ *   `auth-json-credential-store.ts` for the full writeup) — `pi.setModel()`
+ *   silently returned `false` for an extension-registered model until this env
+ *   var bridge was added, with no diagnostic beyond "Pi could not select
+ *   `<model>`" client-side. The real key itself is never embedded in
+ *   `ProviderConfig` (only the `$ENV` reference is), so it still never reaches
+ *   crossbar.json or Pi's in-memory provider config objects as plaintext.
  * - No-auth server: use a fixed, non-secret placeholder. This passes both Pi's
  *   registration and request-time auth checks.
  */
@@ -127,6 +141,10 @@ export async function registerServer(
     if (credential.apiKey === undefined) {
       throw new Error(`API key missing for ${record.label}; add it again through /crossbar`);
     }
+    // Bridge the resolved secret into the exact process.env entry the `$ENV` sentinel in
+    // buildProviderConfig() references, so Pi's own config-value resolver can actually find
+    // it at request time (see the module header for why this is necessary, not optional).
+    process.env[envVarFor(record.id)] = credential.apiKey;
   }
 
   // Retrieve the DiscoveredServer shape from the record.
