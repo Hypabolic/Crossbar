@@ -48,6 +48,7 @@ export type BackendKind =
   | "oobabooga"
   | "jan"
   | "llamafile"
+  | "unsloth"
   | "openai-generic";
 
 /** Backends that are remote cloud services (configured, never port-probed). */
