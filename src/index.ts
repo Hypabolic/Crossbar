@@ -25,7 +25,7 @@ import { createProbe } from "./discovery/probe.ts";
 import { catalogueChanged, pollAll } from "./poll.ts";
 import { preloadCachedProviders } from "./preload.ts";
 import { loadConfig, saveConfig } from "./registry/persistence.ts";
-import { createPiCredentialStore } from "./registry/pi-credential-store.ts";
+import { createAuthJsonCredentialStore } from "./registry/auth-json-credential-store.ts";
 import { serverId } from "./registry/ids.ts";
 import { ServerRegistry } from "./registry/registry.ts";
 import { registerServer, unregisterServer } from "./shim/provider-shim.ts";
@@ -173,7 +173,7 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
       pollTimer = undefined;
     }
 
-    const store = createPiCredentialStore(ctx.modelRegistry.authStorage);
+    const store = createAuthJsonCredentialStore();
     const reg = new ServerRegistry({ store, persist: (cfg) => saveConfig(cfg) });
     const cfg = await loadConfig();
     reg.load(cfg); // registry now owns discovery settings (cfg.settings)
