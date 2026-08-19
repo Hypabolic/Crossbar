@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const adapterMocks = vi.hoisted(() => ({
   listModels: vi.fn(),
@@ -41,6 +41,7 @@ import type { DiscoveredServer, ModelDescriptor, ServerRecord } from "../../src/
 import { ServerRegistry } from "../../src/registry/registry.ts";
 import { registerServer } from "../../src/shim/provider-shim.ts";
 import { openOnboarding } from "../../src/ui/onboarding.ts";
+import { DISCOVERY_ADAPTERS } from "../../src/adapters/index.ts";
 
 const model: ModelDescriptor = {
   id: "local-model",
@@ -77,6 +78,26 @@ function makeRegistry(records: ServerRecord[] = []): ServerRegistry {
       get: vi.fn(async () => undefined),
       set: vi.fn(async () => undefined),
       remove: vi.fn(async () => undefined),
+    },
+    persist: vi.fn(async () => undefined),
+  });
+  registry.load({ version: 1, servers: records });
+  return registry;
+}
+
+/** Like {@link makeRegistry}, but the credential store actually round-trips set()/get() — needed
+ * for scenarios that add an apiKey-auth server and then rely on registerServer() resolving it. */
+function makeRegistryWithRealCredentialStore(records: ServerRecord[] = []): ServerRegistry {
+  const keys = new Map<string, string>();
+  const registry = new ServerRegistry({
+    store: {
+      get: vi.fn(async (id: string) => keys.get(id)),
+      set: vi.fn(async (id: string, key: string) => {
+        keys.set(id, key);
+      }),
+      remove: vi.fn(async (id: string) => {
+        keys.delete(id);
+      }),
     },
     persist: vi.fn(async () => undefined),
   });
@@ -353,5 +374,77 @@ describe("openOnboarding navigation and registration", () => {
     expect(after?.probePorts).toEqual([8080, 5000]); // removed first, order preserved from effective
     // customs: server, settings, ports1, ports2, settings2, server2
     expect(custom).toHaveBeenCalledTimes(6);
+  });
+
+  describe("manual add — authRequired backends skip the auth question", () => {
+    const mockAdapter = DISCOVERY_ADAPTERS[0] as unknown as {
+      authRequired?: boolean;
+      fingerprint: ReturnType<typeof vi.fn>;
+    };
+    const authRequiredServer: DiscoveredServer = {
+      kind: "llamacpp",
+      baseUrl: "http://mock-auth-required:8888",
+      auth: "apiKey",
+      label: "Mock Auth-Required Backend (mock-auth-required:8888)",
+      confidence: 0.9,
+    };
+
+    afterEach(() => {
+      delete mockAdapter.authRequired;
+      mockAdapter.fingerprint.mockReset();
+    });
+
+    it("skips the auth question and goes straight to the API-key prompt", async () => {
+      mockAdapter.authRequired = true;
+      mockAdapter.fingerprint.mockResolvedValue(authRequiredServer);
+
+      const registry = makeRegistryWithRealCredentialStore();
+      const { pi, ctx, registerProvider } = makeHarness([
+        "__manual__", // server selector → manual add
+        model.id, // model picker
+        null, // server selector closes
+      ]);
+      (ctx.ui.input as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce("mock-auth-required:8888") // Server URL
+        .mockResolvedValueOnce("the-real-key"); // API key (asked directly, no auth menu)
+
+      await openOnboarding(pi, ctx, { registry, discover: async () => [] });
+
+      // The auth choice menu (["No authentication", "Enter API key"]) must never appear —
+      // authRequired short-circuits straight to the key prompt.
+      expect(ctx.ui.select).not.toHaveBeenCalledWith(
+        "Authentication",
+        expect.arrayContaining(["No authentication (open server)"]),
+      );
+      expect(ctx.ui.notify).toHaveBeenCalledWith(
+        expect.stringContaining("requires an API key"),
+        "info",
+      );
+      expect(registerProvider).toHaveBeenCalledOnce();
+      const record = registry.list()[0]!;
+      expect(record.auth).toBe("apiKey");
+    });
+
+    it("still asks the normal auth question when no adapter declares authRequired", async () => {
+      delete mockAdapter.authRequired;
+      mockAdapter.fingerprint.mockResolvedValue(authRequiredServer);
+
+      const registry = makeRegistry();
+      const { pi, ctx, registerProvider } = makeHarness([
+        "__manual__",
+        model.id,
+        null,
+      ]);
+      (ctx.ui.input as ReturnType<typeof vi.fn>).mockResolvedValueOnce("mock-auth-required:8888");
+      (ctx.ui.select as ReturnType<typeof vi.fn>).mockResolvedValueOnce("No authentication (open server)");
+
+      await openOnboarding(pi, ctx, { registry, discover: async () => [] });
+
+      expect(ctx.ui.select).toHaveBeenCalledWith(
+        "Authentication",
+        ["No authentication (open server)", "Enter API key"],
+      );
+      expect(registerProvider).toHaveBeenCalledOnce();
+    });
   });
 });

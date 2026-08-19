@@ -1279,21 +1279,69 @@ export async function openOnboarding(
         continue;
       }
 
-      const authChoice = await ctx.ui.select(
-        "Authentication",
-        ["No authentication (open server)", "Enter API key"],
-      );
-      if (authChoice === undefined) continue;
+      // Pre-probe unauthenticated, once, before asking the auth question. Some backends
+      // (e.g. Unsloth Studio) declare `authRequired: true` because they reject EVERY
+      // request — including their own metadata endpoints — without a key. For those, the
+      // adapter can still identify itself from public response shape/headers even on a
+      // bare 401 (see e.g. unsloth.ts). Detecting that up front lets Crossbar skip the
+      // "No authentication" choice entirely for a backend that can never work with it,
+      // instead of letting the user pick it and land on the generic "could not identify
+      // the server" dead end once every adapter's fingerprint 401s.
+      let preProbeAdapter: BackendAdapter | undefined;
+      let preProbeServer: DiscoveredServer | undefined;
+      try {
+        const bareProbe = createProbe(targetBaseUrl, {
+          auth: { mode: "none" },
+          defaultTimeoutMs: 3000,
+        });
+        const { DISCOVERY_ADAPTERS } = await import("../adapters/index.ts");
+        for (const adapter of DISCOVERY_ADAPTERS) {
+          try {
+            const result = await adapter.fingerprint(targetBaseUrl, bareProbe);
+            if (result) {
+              preProbeAdapter = adapter;
+              preProbeServer = result;
+              break;
+            }
+          } catch {
+            // Try the next adapter.
+          }
+        }
+      } catch {
+        // Pre-probe is best-effort only — network trouble here just falls through to the
+        // normal auth question below, exactly like before this pre-probe existed.
+      }
 
-      selectedAuth = authChoice === "Enter API key" ? "apiKey" : "none";
-      if (selectedAuth === "apiKey") {
-        const key = await ctx.ui.input("API key", "Paste your key (hidden after this dialog)");
+      if (preProbeAdapter?.authRequired && preProbeServer) {
+        ctx.ui.notify(
+          `Crossbar: ${preProbeServer.label} requires an API key.`,
+          "info",
+        );
+        selectedAuth = "apiKey";
+        const key = await ctx.ui.input("API key", `Required by ${preProbeAdapter.displayName}`);
         if (key === undefined) continue;
         if (key.length === 0) {
           ctx.ui.notify("Crossbar: API key cannot be empty.", "warning");
           continue;
         }
         manualApiKey = key;
+      } else {
+        const authChoice = await ctx.ui.select(
+          "Authentication",
+          ["No authentication (open server)", "Enter API key"],
+        );
+        if (authChoice === undefined) continue;
+
+        selectedAuth = authChoice === "Enter API key" ? "apiKey" : "none";
+        if (selectedAuth === "apiKey") {
+          const key = await ctx.ui.input("API key", "Paste your key (hidden after this dialog)");
+          if (key === undefined) continue;
+          if (key.length === 0) {
+            ctx.ui.notify("Crossbar: API key cannot be empty.", "warning");
+            continue;
+          }
+          manualApiKey = key;
+        }
       }
     } else {
       const existingRecord = registry.list().find((r) => r.baseUrl === chosenBaseUrl);
