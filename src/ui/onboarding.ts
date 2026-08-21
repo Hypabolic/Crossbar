@@ -5,6 +5,7 @@
  *  - Pure, unit-testable helpers:
  *      buildDiscoveredItems   — SelectItem[] from discovered servers + existing registry
  *      buildModelItems        — SelectItem[] from ModelDescriptor[]
+ *      hasManualLoadModels    — whether the picker needs the ○ manual-load footnote
  *      capabilityActions      — capability-filtered action list
  *      normalizeManualUrl     — coerce bare host:port / missing-scheme inputs to a valid origin
  *
@@ -23,7 +24,7 @@ import { DynamicBorder, getSelectListTheme } from "@earendil-works/pi-coding-age
 import { Container, type SelectItem, SelectList, Text, matchesKey, CancellableLoader } from "@earendil-works/pi-tui";
 
 import type { BackendAdapter } from "../core/backend-adapter.ts";
-import { canIntrospect, canLoadUnload, canSwitch } from "../core/backend-adapter.ts";
+import { canAutoLoadStatus, canIntrospect, canLoadUnload, canSwitch } from "../core/backend-adapter.ts";
 import type { CrossbarSettings, DiscoveredServer, HealthState, LoadedState, ModelDescriptor, ServerRecord } from "../core/types.ts";
 import type { ServerRegistry } from "../registry/registry.ts";
 import { serverId } from "../registry/ids.ts";
@@ -277,8 +278,18 @@ export function buildSettingsItems(settings: CrossbarSettings): SelectItem[] {
  * The description line surfaces the context window (when known) and any
  * capability badges (vision, tools, reasoning, embeddings). A currently-loaded model
  * (where the backend reports it) is marked with a leading ● and a "loaded" badge.
+ *
+ * When `options.autoLoadsOnDemand === false` (the backend answered authoritatively
+ * that it will NOT auto-load unloaded models on request — e.g. Unsloth Studio with
+ * "Switch model by request" off), every not-loaded model is additionally marked with
+ * a leading ○ and a "no auto-load" badge: picking it would only fail on the first
+ * request, so the picker says so up front. `undefined` (unknown) leaves the list
+ * unmarked — same as before this option existed.
  */
-export function buildModelItems(models: ModelDescriptor[]): SelectItem[] {
+export function buildModelItems(
+  models: ModelDescriptor[],
+  options?: { autoLoadsOnDemand?: boolean | undefined },
+): SelectItem[] {
   return models.map((m): SelectItem => {
     const parts: string[] = [];
 
@@ -301,16 +312,33 @@ export function buildModelItems(models: ModelDescriptor[]): SelectItem[] {
     // (LM Studio's `state:"loaded"`). The ● matches the loaded-model widget; the
     // "loaded" badge leads the description so it reads even without colour.
     const name = m.name || m.id;
+    // ○ is the hollow counterpart of ●: not resident, and the server will not load
+    // it on demand either — it must be loaded in the backend's own UI first.
+    const needsManualLoad = options?.autoLoadsOnDemand === false && m.loaded !== true;
     const item: SelectItem = {
       value: m.id,
-      label: m.loaded ? `● ${name}` : name,
+      label: m.loaded ? `● ${name}` : needsManualLoad ? `○ ${name}` : name,
     };
     if (m.loaded) parts.unshift("loaded");
+    else if (needsManualLoad) parts.unshift("no auto-load");
     if (parts.length > 0) {
       item.description = parts.join("  ");
     }
     return item;
   });
+}
+
+/**
+ * True when at least one of these models is not currently loaded and the server
+ * will not auto-load it on demand — i.e. the picker shows ○ marks and must carry
+ * the explanatory footnote. `undefined` (unknown) is never true: we only warn when
+ * the backend told us explicitly.
+ */
+export function hasManualLoadModels(
+  models: ModelDescriptor[],
+  autoLoadsOnDemand: boolean | undefined,
+): boolean {
+  return autoLoadsOnDemand === false && models.some((m) => m.loaded !== true);
 }
 
 /**
@@ -442,6 +470,7 @@ function selectOverlay(
   title: string,
   items: SelectItem[],
   hint: string,
+  footnote?: string,
 ): Promise<string | null> {
   return ctx.ui.custom<string | null>(
     (_tui, theme, _kb, done) => {
@@ -454,6 +483,9 @@ function selectOverlay(
       list.onCancel = () => done(null);
 
       container.addChild(list);
+      if (footnote) {
+        container.addChild(new Text(theme.fg("dim", footnote)));
+      }
       container.addChild(new Text(theme.fg("dim", hint)));
       container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
 
@@ -556,6 +588,27 @@ async function fetchModels(
 }
 
 /**
+ * Ask a backend whether unloaded models auto-load on demand — only when it can
+ * answer authoritatively (Capability.AutoLoadStatus, e.g. Unsloth Studio's
+ * "Switch model by request" setting). Never throws; `undefined` means unknown,
+ * in which case the picker stays unmarked.
+ */
+async function resolveAutoLoadsOnDemand(
+  registry: ServerRegistry,
+  record: ServerRecord,
+): Promise<boolean | undefined> {
+  const adapter = adapterFor(record.kind);
+  if (!canAutoLoadStatus(adapter)) return undefined;
+  try {
+    const cred = await registry.resolveCredential(record);
+    const probe = createProbe(record.baseUrl, { auth: cred });
+    return await adapter.autoLoadsOnDemand(serverFromRecord(record), cred, probe);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Pick one of the server's registered models and make it the model Pi uses — a
  * pure Pi-side selection (no server-side switch/load). Works for every backend,
  * including those without SwitchModel/LoadUnload (vLLM, llama.cpp, generic, …).
@@ -574,11 +627,20 @@ async function performUseModel(
     return;
   }
 
+  // Ask before showing the picker: if the server will NOT auto-load unloaded
+  // models, mark them (○) so the user doesn't pick one only to 404 on turn one.
+  const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(registry, record);
+  const adapter = adapterFor(record.kind);
+  const footnote = hasManualLoadModels(selectableModels, autoLoadsOnDemand)
+    ? `○ = not loaded — ${adapter.displayName} won't auto-load it; load it in ${adapter.displayName} first`
+    : undefined;
+
   const modelId = await selectOverlay(
     ctx,
     `Use a model in Pi — ${record.label}`,
-    buildModelItems(selectableModels),
+    buildModelItems(selectableModels, { autoLoadsOnDemand }),
     "↑↓ navigate · Enter select · Esc cancel",
+    footnote,
   );
   if (!modelId) return;
 
@@ -589,6 +651,16 @@ async function performUseModel(
       : `Crossbar: could not select ${modelId} — pick it from /model.`,
     selected ? "info" : "warning",
   );
+
+  // Last-line warning: the selection succeeded Pi-side, but the server cannot
+  // actually serve this model until someone loads it.
+  const picked = selectableModels.find((m) => m.id === modelId);
+  if (picked && picked.loaded !== true && autoLoadsOnDemand === false) {
+    ctx.ui.notify(
+      `Crossbar: ${modelId} is not loaded and ${adapter.displayName} won't auto-load it — load it in ${adapter.displayName} first.`,
+      "warning",
+    );
+  }
 }
 
 /** Switch the active model or load a model: pick from the list, then call the adapter. */
@@ -611,11 +683,16 @@ async function performModelAction(
   const title = action === "switch"
     ? `Switch model — ${record.label}`
     : `Load model — ${record.label}`;
+  const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(registry, record);
+  const footnote = hasManualLoadModels(selectableModels, autoLoadsOnDemand)
+    ? `○ = not loaded — ${adapter.displayName} won't auto-load it; load it in ${adapter.displayName} first`
+    : undefined;
   const modelId = await selectOverlay(
     ctx,
     title,
-    buildModelItems(selectableModels),
+    buildModelItems(selectableModels, { autoLoadsOnDemand }),
     "↑↓ navigate · Enter select · Esc cancel",
+    footnote,
   );
   if (!modelId) return;
 

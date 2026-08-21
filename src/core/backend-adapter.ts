@@ -32,8 +32,11 @@ import type {
  * Bumped on any change to this interface. Adapters and the registry assert on it.
  * v3: added optional `authRequired` (non-breaking — existing adapters are unaffected; only
  * backends that can never work without a key, e.g. Unsloth Studio, need to set it).
+ * v4: added optional `autoLoadsOnDemand` + `Capability.AutoLoadStatus` (non-breaking —
+ * existing adapters are unaffected; only backends that can answer authoritatively,
+ * e.g. Unsloth Studio's "Switch model by request" setting, implement it).
  */
-export const CONTRACT_VERSION = 3 as const;
+export const CONTRACT_VERSION = 4 as const;
 
 /** Which built-in Pi API type the adapter registers its models under. */
 export type PiApiType = "openai-completions" | "anthropic-messages";
@@ -91,6 +94,20 @@ export interface BackendAdapter {
     probe: Probe,
   ): Promise<void>;
 
+  /**
+   * Will this server auto-load (or switch to) an UNLOADED model when a request names it?
+   * Present iff {@link Capability.AutoLoadStatus}. Informational — the UI uses it to warn
+   * that a model must be loaded via the backend's own interface before it can serve
+   * requests. `true` = unloaded models are served on demand; `false` = requests for
+   * unloaded models fail until the user loads them elsewhere; `undefined` = the server
+   * did not answer authoritatively (treat as unknown, never guess).
+   */
+  autoLoadsOnDemand?(
+    server: DiscoveredServer,
+    cred: ServerCredential,
+    probe: Probe,
+  ): Promise<boolean | undefined>;
+
   /** Explicit load/unload. Present iff {@link Capability.LoadUnload}. */
   loadUnload?(
     server: DiscoveredServer,
@@ -132,4 +149,10 @@ export function canLoadUnload(
   a: BackendAdapter,
 ): a is BackendAdapter & Required<Pick<BackendAdapter, "loadUnload">> {
   return typeof a.loadUnload === "function";
+}
+
+export function canAutoLoadStatus(
+  a: BackendAdapter,
+): a is BackendAdapter & Required<Pick<BackendAdapter, "autoLoadsOnDemand">> {
+  return typeof a.autoLoadsOnDemand === "function";
 }

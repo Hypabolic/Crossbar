@@ -25,6 +25,12 @@ export enum Capability {
   PerModelCaps = "perModelCaps",
   /** Supports streaming responses. Effectively universal for the chat path. */
   Streaming = "streaming",
+  /**
+   * Can report whether unloaded models are auto-loaded when a request names them
+   * (e.g. Unsloth Studio's "Switch model by request" setting). Informational —
+   * drives picker warnings, not actions.
+   */
+  AutoLoadStatus = "autoLoadStatus",
 }
 
 /** Authentication scheme a server requires. Crossbar only ever sends a bearer/api key or nothing. */

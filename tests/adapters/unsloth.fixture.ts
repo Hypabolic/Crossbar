@@ -89,6 +89,32 @@ const MODELS_ROUTE = (init?: ProbeInit): ProbeResult =>
   init?.headers?.["Authorization"] ? AUTHENTICATED_RESPONSE : UNAUTHENTICATED_RESPONSE;
 
 /**
+ * Captured verbatim from the live instance (2026-08-19): `GET /api/settings/openai-auto-switch`
+ * with a bearer token — the API surface of the "Switch model by request" toggle (Settings ▸ API).
+ * `enabled: false` is the state that makes requests for unloaded models 404 with
+ * `model_not_found`, which is exactly the case the adapter's `autoLoadsOnDemand` must surface.
+ */
+const AUTO_SWITCH_OFF_RESPONSE: ProbeResult = {
+  status: 200,
+  ok: true,
+  headers: {
+    server: "unsloth-studio",
+    "content-type": "application/json",
+  },
+  json: {
+    enabled: false,
+    auto_unload_idle_seconds: 0,
+    default_enabled: false,
+    idle_unload_active: false,
+    auto_unload_keep_kv: true,
+    auto_download_model: false,
+    auto_unload_api_only: false,
+    media_auto_unload_idle_seconds: 0,
+    media_idle_unload_active: false,
+  },
+};
+
+/**
  * Another backend's response shape: no `Server: unsloth-studio` header at all. This is the
  * only signal this adapter's fingerprint claims a kind from, so anything lacking it — even a
  * plausible-looking 200 + `data[]` — must yield null.
@@ -114,6 +140,7 @@ export const unslothFixture: AdapterFixture = {
 
   routes: {
     "/v1/models": MODELS_ROUTE,
+    "/api/settings/openai-auto-switch": AUTO_SWITCH_OFF_RESPONSE,
   },
 
   negativeRoutes: NEGATIVE_ROUTES,
@@ -139,5 +166,8 @@ export const unslothFixture: AdapterFixture = {
     // deliberately emits maxTokens: 0 ("unbounded — let the server decide") rather than
     // inventing one. Same contract as llama.cpp and llama-swap.
     maxTokensMayBeUnbounded: true,
+    // The fixture's settings endpoint reports the toggle OFF — the case that matters for
+    // the picker warning (unloaded models 404 until loaded in the Studio UI).
+    autoLoadStatus: { expected: false },
   },
 };

@@ -25,6 +25,7 @@ import {
   buildModelItems,
   buildSettingsItems,
   capabilityActions,
+  hasManualLoadModels,
   normalizeManualUrl,
   parseHosts,
   parsePorts,
@@ -451,6 +452,67 @@ describe("buildModelItems", () => {
 
   it("handles an empty model list", () => {
     expect(buildModelItems([])).toHaveLength(0);
+  });
+
+  describe("manual-load marking (autoLoadsOnDemand === false)", () => {
+    it("marks unloaded models with a ○ label prefix and a 'no auto-load' badge", () => {
+      const items = buildModelItems(
+        [makeModel({ id: "big-model", name: "Big Model", loaded: false })],
+        { autoLoadsOnDemand: false },
+      );
+      expect(items[0]!.label).toBe("○ Big Model");
+      expect(items[0]!.description?.startsWith("no auto-load")).toBe(true);
+    });
+
+    it("does not mark loaded models even when auto-loading is off", () => {
+      const items = buildModelItems(
+        [makeModel({ id: "resident", name: "Resident", loaded: true })],
+        { autoLoadsOnDemand: false },
+      );
+      expect(items[0]!.label).toBe("● Resident");
+      expect(items[0]!.description ?? "").not.toContain("no auto-load");
+    });
+
+    it("does not mark anything when auto-loading is on", () => {
+      const items = buildModelItems(
+        [makeModel({ id: "a", name: "A", loaded: false })],
+        { autoLoadsOnDemand: true },
+      );
+      expect(items[0]!.label).toBe("A");
+      expect(items[0]!.description ?? "").not.toContain("no auto-load");
+    });
+
+    it("does not mark anything when the answer is unknown (undefined)", () => {
+      const items = buildModelItems(
+        [makeModel({ id: "a", name: "A", loaded: false })],
+        { autoLoadsOnDemand: undefined },
+      );
+      expect(items[0]!.label).toBe("A");
+      expect(items[0]!.description ?? "").not.toContain("no auto-load");
+    });
+
+    it("keeps the context window and caps after the badge", () => {
+      const items = buildModelItems(
+        [makeModel({ id: "a", name: "A", loaded: false, contextWindow: 32768, reasoning: true })],
+        { autoLoadsOnDemand: false },
+      );
+      expect(items[0]!.description).toBe("no auto-load  33k ctx  reasoning");
+    });
+  });
+});
+
+// ─── hasManualLoadModels ─────────────────────────────────────────────────────
+
+describe("hasManualLoadModels", () => {
+  it("is true only when the answer is explicitly false and some model is not loaded", () => {
+    const loaded = makeModel({ id: "l", loaded: true });
+    const unloaded = makeModel({ id: "u", loaded: false });
+    expect(hasManualLoadModels([unloaded], false)).toBe(true);
+    expect(hasManualLoadModels([loaded, unloaded], false)).toBe(true);
+    expect(hasManualLoadModels([loaded], false)).toBe(false);
+    expect(hasManualLoadModels([unloaded], true)).toBe(false);
+    expect(hasManualLoadModels([unloaded], undefined)).toBe(false);
+    expect(hasManualLoadModels([], false)).toBe(false);
   });
 });
 

@@ -196,5 +196,11 @@ export interface AdapterFixture {
      * Must start with "http://" or "https://".
      */
     inferenceBaseUrlPrefix: string;
+
+    /**
+     * What `autoLoadsOnDemand` must return on the success path.
+     * Only validated when `AutoLoadStatus` is in adapter.capabilities.
+     */
+    autoLoadStatus?: { expected: boolean | undefined };
   };
 }

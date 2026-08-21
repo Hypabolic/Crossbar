@@ -9,6 +9,7 @@ export {
 
 export {
   CONTRACT_VERSION,
+  canAutoLoadStatus,
   canIntrospect,
   canLoadUnload,
   canSwitch,

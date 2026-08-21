@@ -76,6 +76,15 @@ interface UnslothModelsResponse {
   data?: UnslothModelEntry[];
 }
 
+/**
+ * Shape of `GET /api/settings/openai-auto-switch` — the API surface of the
+ * "Switch model by request" toggle (Settings ▸ API in the Studio UI). Only
+ * `enabled` matters here; the rest of the body is ignored.
+ */
+interface UnslothAutoSwitchSettings {
+  enabled?: unknown;
+}
+
 /** The literal header value Unsloth Studio sets on every response. */
 const SERVER_HEADER_VALUE = "unsloth-studio";
 
@@ -85,6 +94,14 @@ const SERVER_HEADER_VALUE = "unsloth-studio";
 
 /** Unsloth Studio's documented default port (`UNSLOTH_STUDIO_URL` default). */
 const DEFAULT_PORT = 8888;
+
+/**
+ * Settings endpoint backing the "Switch model by request" toggle. Discovered in the
+ * Studio frontend bundle and verified against a live instance (2026-08-19):
+ * `GET /api/settings/openai-auto-switch` → 200 `{ "enabled": false, ... }` with a
+ * bearer key; the toggle's PUT writes the same object back.
+ */
+const AUTO_SWITCH_SETTINGS_PATH = "/api/settings/openai-auto-switch";
 
 /**
  * Fallback context used ONLY at the Pi-mapping boundary, where the field is mandatory and a
@@ -147,6 +164,7 @@ class UnslothAdapter implements BackendAdapter {
     Capability.ListModels,
     Capability.IntrospectLoaded,
     Capability.Streaming,
+    Capability.AutoLoadStatus,
   ]);
   /** Unsloth Studio rejects every request — including GET /v1/models — without a valid key. */
   readonly authRequired = true;
@@ -230,6 +248,35 @@ class UnslothAdapter implements BackendAdapter {
       loadedModelIds: models.filter((m) => m.loaded === true).map((m) => m.id),
       source: "introspection",
     };
+  }
+
+  // --- autoLoadsOnDemand ------------------------------------------------------------------------
+
+  /**
+   * Reads the "Switch model by request" setting (Settings ▸ API). When it is OFF, a request
+   * naming an unloaded model 404s with a `model_not_found` error that points at exactly this
+   * setting — so the picker must mark those models instead of letting the user pick one and
+   * watch the first turn fail. When ON, unloaded models are loaded on demand and need no mark.
+   *
+   * Defensive by contract: a non-200 (old server versions without the endpoint 404), a
+   * missing/malformed body, or a non-boolean `enabled` all yield `undefined` (unknown) —
+   * the caller then shows the picker unmarked, i.e. today's behaviour.
+   */
+  async autoLoadsOnDemand(
+    _server: DiscoveredServer,
+    cred: ServerCredential,
+    probe: Probe,
+  ): Promise<boolean | undefined> {
+    const headers: Record<string, string> = {};
+    if (cred.mode === "apiKey" && cred.apiKey) {
+      headers["Authorization"] = `Bearer ${cred.apiKey}`;
+    }
+
+    const r = await probe(AUTO_SWITCH_SETTINGS_PATH, { headers });
+    if (!r.ok || r.status !== 200) return undefined;
+
+    const body = r.json as UnslothAutoSwitchSettings | undefined;
+    return typeof body?.enabled === "boolean" ? body.enabled : undefined;
   }
 
   // --- toPiModel ------------------------------------------------------------------------------

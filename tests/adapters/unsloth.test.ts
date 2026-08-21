@@ -14,6 +14,8 @@ import { runConformance } from "../conformance/run-conformance.ts";
 import { createFakeProbe } from "../conformance/fake-probe.ts";
 import { unslothAdapter } from "../../src/adapters/unsloth.ts";
 import { unslothFixture } from "./unsloth.fixture.ts";
+import { Capability } from "../../src/core/capability.ts";
+import type { Probe } from "../../src/core/types.ts";
 
 runConformance([unslothFixture]);
 
@@ -208,5 +210,90 @@ describe("[unsloth] adapter-specific", () => {
     expect(unslothAdapter.inferenceBaseUrl({ ...server, baseUrl: "http://127.0.0.1:8888/v1" })).toBe(
       "http://127.0.0.1:8888/v1",
     );
+  });
+
+  describe("autoLoadsOnDemand (\"Switch model by request\")", () => {
+    const server = {
+      kind: "unsloth" as const,
+      baseUrl: "http://127.0.0.1:8888",
+      auth: "apiKey" as const,
+      label: "Unsloth Studio",
+      confidence: 0.95,
+    };
+    const cred = { mode: "apiKey" as const, apiKey: "sk-unsloth-test-key" };
+
+    const settingsRoute = (enabled: unknown) => ({
+      "/api/settings/openai-auto-switch": {
+        status: 200,
+        ok: true,
+        headers: { server: "unsloth-studio", "content-type": "application/json" },
+        json: { enabled, auto_unload_idle_seconds: 0 },
+      },
+    });
+
+    it("declares the AutoLoadStatus capability", () => {
+      expect(unslothAdapter.capabilities.has(Capability.AutoLoadStatus)).toBe(true);
+    });
+
+    it("returns false when the toggle is off (unloaded models 404 until loaded in the UI)", async () => {
+      const probe = createFakeProbe(settingsRoute(false));
+      const result = await unslothAdapter.autoLoadsOnDemand!(server, cred, probe);
+      expect(result).toBe(false);
+    });
+
+    it("returns true when the toggle is on (unloaded models are served on demand)", async () => {
+      const probe = createFakeProbe(settingsRoute(true));
+      const result = await unslothAdapter.autoLoadsOnDemand!(server, cred, probe);
+      expect(result).toBe(true);
+    });
+
+    it("sends the bearer key with the settings request", async () => {
+      let seenHeaders: Record<string, string> | undefined;
+      const probe: Probe = async (_path, init) => {
+        seenHeaders = init?.headers;
+        return {
+          status: 200,
+          ok: true,
+          headers: { server: "unsloth-studio" },
+          json: { enabled: false },
+        };
+      };
+      await unslothAdapter.autoLoadsOnDemand!(server, cred, probe);
+      expect(seenHeaders?.["Authorization"]).toBe("Bearer sk-unsloth-test-key");
+    });
+
+    it("returns undefined (not a throw) when the endpoint is missing — old server versions", async () => {
+      const probe = createFakeProbe({}); // no fixture → status 0
+      const result = await unslothAdapter.autoLoadsOnDemand!(server, cred, probe);
+      expect(result).toBeUndefined();
+    });
+
+    it("returns undefined on 401 (invalid key)", async () => {
+      const probe = createFakeProbe({
+        "/api/settings/openai-auto-switch": {
+          status: 401,
+          ok: false,
+          headers: { server: "unsloth-studio" },
+          json: { error: { message: "Not authenticated", type: "authentication_error" } },
+        },
+      });
+      const result = await unslothAdapter.autoLoadsOnDemand!(server, cred, probe);
+      expect(result).toBeUndefined();
+    });
+
+    it("returns undefined when the body is malformed or `enabled` is not a boolean", async () => {
+      for (const body of [undefined, { enabled: "yes" }, { enabled: 0 }, { other: true }]) {
+        const probe = createFakeProbe({
+          "/api/settings/openai-auto-switch": {
+            status: 200,
+            ok: true,
+            headers: { server: "unsloth-studio" },
+            json: body,
+          },
+        });
+        const result = await unslothAdapter.autoLoadsOnDemand!(server, cred, probe);
+        expect(result).toBeUndefined();
+      }
+    });
   });
 });
