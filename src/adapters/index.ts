@@ -19,6 +19,7 @@ import { vllmAdapter } from "./vllm.ts";
 import { omlxAdapter } from "./omlx.ts";
 import { openaiAdapter } from "./openai.ts";
 import { anthropicAdapter } from "./anthropic.ts";
+import { unslothAdapter } from "./unsloth.ts";
 import { genericAdapter } from "./generic.ts";
 
 /** Every adapter Crossbar ships. */
@@ -31,6 +32,7 @@ export const ADAPTERS: readonly BackendAdapter[] = [
   omlxAdapter,
   openaiAdapter,
   anthropicAdapter,
+  unslothAdapter,
   genericAdapter,
 ];
 
@@ -63,5 +65,6 @@ export {
   omlxAdapter,
   openaiAdapter,
   anthropicAdapter,
+  unslothAdapter,
   genericAdapter,
 };

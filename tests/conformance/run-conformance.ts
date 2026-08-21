@@ -272,6 +272,28 @@ function describeAdapter(fixture: AdapterFixture): void {
         });
       });
     }
+
+    // 10. autoLoadsOnDemand (when capability present)
+    if (supports(adapter, Capability.AutoLoadStatus)) {
+      describe("autoLoadsOnDemand", () => {
+        it("returns the fixture's expected answer on the success path", async () => {
+          const result = await adapter.autoLoadsOnDemand!(
+            resolveServer(fixture),
+            cred,
+            createFakeProbe(routes as RouteMap),
+          );
+          expect(result).toBe(exp.autoLoadStatus?.expected);
+        });
+        it("returns undefined (not a throw) when the endpoint is unreachable", async () => {
+          const result = await adapter.autoLoadsOnDemand!(
+            resolveServer(fixture),
+            cred,
+            createFakeProbe({}),
+          );
+          expect(result).toBeUndefined();
+        });
+      });
+    }
   });
 }
 

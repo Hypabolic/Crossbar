@@ -91,7 +91,7 @@ class GenericAdapter implements BackendAdapter {
 
   /**
    * GET /v1/models → map data[].id to ModelDescriptor.
-   * Conservative defaults are applied (contextWindow 8192, maxTokens 4096, input ["text"]).
+   * Conservative defaults are applied (contextWindow 8192, maxTokens = half of contextWindow, input ["text"]).
    * Common embedding/reranking model families are excluded from chat registration.
    * Throws on non-ok / 401 / status:0.
    */
@@ -112,21 +112,52 @@ class GenericAdapter implements BackendAdapter {
     if (r.status === 0) throw new Error("listModels failed: server unreachable (status 0)");
     if (!r.ok) throw new Error(`listModels failed: HTTP ${r.status}`);
 
-    const body = r.json as { data?: Array<{ id?: unknown }> } | undefined;
+    interface GenericModelEntry {
+      id?: unknown;
+      max_completion_tokens?: number;
+      max_model_len?: number;
+      context_length?: number;
+      max_context_length?: number;
+      context_window?: number;
+    }
+    interface GenericModelEntryWithId extends GenericModelEntry {
+      id: string;
+    }
+
+    const body = r.json as { data?: GenericModelEntry[] } | undefined;
     if (!Array.isArray(body?.data)) return [];
 
     return body.data
-      .filter((item): item is { id: string } => typeof item?.id === "string")
+      .filter((item): item is GenericModelEntryWithId => typeof item?.id === "string")
       .map((item): ModelDescriptor => {
         const normalizedId = item.id.toLowerCase();
         const isEmbedding =
           /(^|[/:._-])(embed|embedding|bge|gte|e5|reranker)([/:._-]|$)/.test(normalizedId) ||
           normalizedId.includes("nomic-embed");
+        
+        const contextWindow =
+          typeof item.context_window === "number" && item.context_window > 0
+            ? item.context_window
+            : typeof item.max_model_len === "number" && item.max_model_len > 0
+              ? item.max_model_len
+              : typeof item.context_length === "number" && item.context_length > 0
+                ? item.context_length
+                : typeof item.max_context_length === "number" && item.max_context_length > 0
+                  ? item.max_context_length
+                  : undefined;
+        
+        const finalContextWindow = contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+        
+        const maxTokens =
+          typeof item.max_completion_tokens === "number" && item.max_completion_tokens > 0
+            ? item.max_completion_tokens
+            : Math.floor(finalContextWindow / 2);
+        
         return {
           id: item.id,
           name: item.id,
-          contextWindow: DEFAULT_CONTEXT_WINDOW,
-          maxTokens: DEFAULT_MAX_TOKENS,
+          contextWindow: finalContextWindow,
+          maxTokens,
           input: ["text"],
           reasoning: false,
           embeddings: isEmbedding,

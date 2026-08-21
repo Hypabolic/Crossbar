@@ -179,4 +179,25 @@ describe("[integration] programmatic preload via CLI", () => {
     // The specific model should not be treated as available (no key)
     expect(output).not.toMatch(/test-model|TestKeyed/i);
   });
+
+  // End-to-end regression test for the real bug: a key was written to auth.json (via
+  // createAuthJsonCredentialStore), but `pi.setModel()` still failed because nothing ever
+  // bridged it into the process.env variable the registered ProviderConfig's `$ENV` sentinel
+  // references. This spawns the REAL local `pi` binary (no mocks, no fakes) against an
+  // isolated agent dir with a genuine (throwaway, never-real) auth.json entry, and asserts the
+  // cached model shows up as an AVAILABLE model — the exact opposite assertion from the
+  // "keyed-without-key" test above, using the same record shape plus one auth.json entry.
+  it("keyed-WITH-key (in auth.json) is registered AND available via --list-models", () => {
+    writeCrossbarJson(agentDir, [keyedRecord]);
+    writeAuthJson(agentDir, {
+      [keyedRecord.id]: { type: "api_key", key: "sk-test-dummy-throwaway-key" },
+    });
+
+    const { status, output } = runPi(["--extension", EXT_PATH, "--list-models", "--no-session"]);
+
+    expect(output).not.toMatch(/Error|exception|crash|API key missing/i);
+    // Unlike the no-key case, the model must now be listed as available.
+    expect(output).toMatch(/test-model|TestKeyed/i);
+    expect(status).toBe(0);
+  });
 });

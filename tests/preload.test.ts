@@ -38,6 +38,9 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
+  // Defensive: the process.env bridge (for auth.json-backed keys, see below) must never leak
+  // into other test files sharing this worker process.
+  delete process.env[envVarFor(keyedRecord.id)];
 });
 
 // ---------------------------------------------------------------------------
@@ -250,6 +253,30 @@ describe("preloadCachedProviders", () => {
     const expectedSentinel = "$" + envVarFor(keyedRecord.id);
     expect(config.apiKey).toBe(expectedSentinel);
     expect(config.apiKey).toBe("$CROSSBAR_OPENAI");
+  });
+
+  it("bridges an already-persisted key from auth.json into process.env for the $ENV sentinel", async () => {
+    await writeCfg([keyedRecord]);
+    writeFileSync(
+      join(dir, "auth.json"),
+      JSON.stringify({ [keyedRecord.id]: { type: "api_key", key: "sk-preloaded-key" } }, null, 2),
+    );
+    const { pi } = makeFakePi();
+
+    await preloadCachedProviders(pi, { dir });
+
+    expect(process.env[envVarFor(keyedRecord.id)]).toBe("sk-preloaded-key");
+  });
+
+  it("registers with the unresolved $ENV sentinel (no throw) when auth.json has no entry yet", async () => {
+    await writeCfg([keyedRecord]);
+    delete process.env[envVarFor(keyedRecord.id)];
+    const { pi, registerProvider } = makeFakePi();
+
+    await preloadCachedProviders(pi, { dir });
+
+    expect(registerProvider).toHaveBeenCalledOnce();
+    expect(process.env[envVarFor(keyedRecord.id)]).toBeUndefined();
   });
 
   it("does not throw and registers zero when the config file is missing", async () => {

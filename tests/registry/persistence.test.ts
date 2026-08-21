@@ -36,25 +36,25 @@ const minimalRecord: ServerRecord = {
 describe("loadConfig", () => {
   it("returns empty config when file does not exist", async () => {
     const config = await loadConfig({ dir });
-    expect(config).toEqual({ version: 1, modelCacheVersion: 1, servers: [] });
+    expect(config).toEqual({ version: 1, modelCacheVersion: 2, servers: [] });
   });
 
   it("returns empty config when file is not valid JSON", async () => {
     writeFileSync(join(dir, "crossbar.json"), "not json");
     const config = await loadConfig({ dir });
-    expect(config).toEqual({ version: 1, modelCacheVersion: 1, servers: [] });
+    expect(config).toEqual({ version: 1, modelCacheVersion: 2, servers: [] });
   });
 
   it("returns empty config when version is wrong", async () => {
     writeFileSync(join(dir, "crossbar.json"), JSON.stringify({ version: 2, servers: [] }));
     const config = await loadConfig({ dir });
-    expect(config).toEqual({ version: 1, modelCacheVersion: 1, servers: [] });
+    expect(config).toEqual({ version: 1, modelCacheVersion: 2, servers: [] });
   });
 
   it("round-trips a valid config", async () => {
     const original: CrossbarConfigFile = {
       version: 1,
-      modelCacheVersion: 1,
+      modelCacheVersion: 2,
       servers: [minimalRecord],
     };
     await saveConfig(original, { dir });
@@ -64,7 +64,7 @@ describe("loadConfig", () => {
 
   it.each([
     ["missing", undefined],
-    ["invalid", 2],
+    ["invalid", 1],
   ])("migrates legacy llama-swap fallbacks without stripping positive llama.cpp context with a %s marker", async (_label, marker) => {
     const settings = { lanDiscovery: true, probePorts: [8080, 8081] };
     const legacy = {
@@ -126,6 +126,31 @@ describe("loadConfig", () => {
         },
         {
           ...minimalRecord,
+          id: "legacy-unsloth",
+          kind: "unsloth",
+          lastKnownModels: [
+            {
+              // Unsloth reports context fields only for LOADED models; unloaded ones got the
+              // adapter's invented 8192/4096 frozen into the cache.
+              id: "unsloth-fabricated",
+              name: "Unsloth fabricated",
+              input: ["text"],
+              contextWindow: 8192,
+              maxTokens: 4096,
+              loaded: false,
+            },
+            {
+              id: "unsloth-authoritative",
+              name: "Unsloth authoritative",
+              input: ["text"],
+              contextWindow: 262144,
+              maxTokens: 131072,
+              loaded: true,
+            },
+          ],
+        },
+        {
+          ...minimalRecord,
           id: "unaffected-ollama",
           lastKnownModels: [
             {
@@ -145,7 +170,7 @@ describe("loadConfig", () => {
 
     expect(loaded).toEqual({
       version: 1,
-      modelCacheVersion: 1,
+      modelCacheVersion: 2,
       settings,
       servers: [
         {
@@ -198,6 +223,27 @@ describe("loadConfig", () => {
         },
         {
           ...minimalRecord,
+          id: "legacy-unsloth",
+          kind: "unsloth",
+          lastKnownModels: [
+            {
+              id: "unsloth-fabricated",
+              name: "Unsloth fabricated",
+              input: ["text"],
+              loaded: false,
+            },
+            {
+              id: "unsloth-authoritative",
+              name: "Unsloth authoritative",
+              input: ["text"],
+              contextWindow: 262144,
+              maxTokens: 131072,
+              loaded: true,
+            },
+          ],
+        },
+        {
+          ...minimalRecord,
           id: "unaffected-ollama",
           lastKnownModels: [
             {
@@ -213,10 +259,10 @@ describe("loadConfig", () => {
     });
   });
 
-  it("trusts marker-1 model caches without re-migrating legitimate fallback-shaped values", async () => {
+  it("trusts current-marker model caches without re-migrating legitimate fallback-shaped values", async () => {
     const marked: CrossbarConfigFile = {
       version: 1,
-      modelCacheVersion: 1,
+      modelCacheVersion: 2,
       servers: [
         {
           ...minimalRecord,
@@ -264,7 +310,7 @@ describe("saveConfig", () => {
     const text = readFileSync(join(dir, "crossbar.json"), "utf-8");
     // Pretty JSON has newlines
     expect(text).toContain("\n");
-    expect(JSON.parse(text)).toMatchObject({ version: 1, modelCacheVersion: 1 });
+    expect(JSON.parse(text)).toMatchObject({ version: 1, modelCacheVersion: 2 });
   });
 
   it("strips apiKey fields from server records", async () => {
@@ -295,7 +341,7 @@ describe("saveConfig", () => {
     const nested = join(dir, "nested", "deep");
     await saveConfig({ version: 1, servers: [] }, { dir: nested });
     const loaded = await loadConfig({ dir: nested });
-    expect(loaded).toEqual({ version: 1, modelCacheVersion: 1, servers: [] });
+    expect(loaded).toEqual({ version: 1, modelCacheVersion: 2, servers: [] });
   });
 });
 

@@ -1,11 +1,10 @@
 /**
- * Unit tests for the pure helpers in src/ui/onboarding.ts.
+ * Unit tests for the helpers in src/ui/onboarding.ts.
  *
- * NO overlay rendering attempted — these tests cover only the four pure helpers:
- *   - buildDiscoveredItems
- *   - buildModelItems
- *   - capabilityActions
- *   - normalizeManualUrl
+ * Mostly pure helpers (buildDiscoveredItems, buildModelItems, capabilityActions,
+ * normalizeManualUrl, …). The selectOverlay tests drive the REAL pi-tui
+ * SelectList headlessly (stub theme/tui, raw key sequences) to verify the
+ * disabled-item Enter interception.
  *
  * Capability-driven hiding is verified with REAL adapter singletons imported from
  * src/adapters/, so the test is a live check that the adapters honestly declare
@@ -25,11 +24,18 @@ import {
   buildModelItems,
   buildSettingsItems,
   capabilityActions,
+  hasManualLoadModels,
+  manualLoadDisabledValues,
+  manualLoadFootnote,
+  manualLoadReason,
   normalizeManualUrl,
   parseHosts,
   parsePorts,
   probePortDescription,
+  selectOverlay,
 } from "../../src/ui/onboarding.ts";
+
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
 import type { DiscoveredServer, HealthState, ModelDescriptor, ServerRecord } from "../../src/core/types.ts";
 
@@ -451,6 +457,224 @@ describe("buildModelItems", () => {
 
   it("handles an empty model list", () => {
     expect(buildModelItems([])).toHaveLength(0);
+  });
+
+  describe("manual-load marking (autoLoadsOnDemand === false)", () => {
+    it("marks unloaded models with a ○ label prefix and a 'no auto-load' badge", () => {
+      const items = buildModelItems(
+        [makeModel({ id: "big-model", name: "Big Model", loaded: false })],
+        { autoLoadsOnDemand: false },
+      );
+      expect(items[0]!.label).toBe("○ Big Model");
+      expect(items[0]!.description?.startsWith("no auto-load")).toBe(true);
+    });
+
+    it("does not mark loaded models even when auto-loading is off", () => {
+      const items = buildModelItems(
+        [makeModel({ id: "resident", name: "Resident", loaded: true })],
+        { autoLoadsOnDemand: false },
+      );
+      expect(items[0]!.label).toBe("● Resident");
+      expect(items[0]!.description ?? "").not.toContain("no auto-load");
+    });
+
+    it("does not mark anything when auto-loading is on", () => {
+      const items = buildModelItems(
+        [makeModel({ id: "a", name: "A", loaded: false })],
+        { autoLoadsOnDemand: true },
+      );
+      expect(items[0]!.label).toBe("A");
+      expect(items[0]!.description ?? "").not.toContain("no auto-load");
+    });
+
+    it("does not mark anything when the answer is unknown (undefined)", () => {
+      const items = buildModelItems(
+        [makeModel({ id: "a", name: "A", loaded: false })],
+        { autoLoadsOnDemand: undefined },
+      );
+      expect(items[0]!.label).toBe("A");
+      expect(items[0]!.description ?? "").not.toContain("no auto-load");
+    });
+
+    it("keeps the context window and caps after the badge", () => {
+      const items = buildModelItems(
+        [makeModel({ id: "a", name: "A", loaded: false, contextWindow: 32768, reasoning: true })],
+        { autoLoadsOnDemand: false },
+      );
+      expect(items[0]!.description).toBe("no auto-load  33k ctx  reasoning");
+    });
+  });
+});
+
+// ─── hasManualLoadModels ─────────────────────────────────────────────────────
+
+describe("hasManualLoadModels", () => {
+  it("is true only when the answer is explicitly false and some model is not loaded", () => {
+    const loaded = makeModel({ id: "l", loaded: true });
+    const unloaded = makeModel({ id: "u", loaded: false });
+    expect(hasManualLoadModels([unloaded], false)).toBe(true);
+    expect(hasManualLoadModels([loaded, unloaded], false)).toBe(true);
+    expect(hasManualLoadModels([loaded], false)).toBe(false);
+    expect(hasManualLoadModels([unloaded], true)).toBe(false);
+    expect(hasManualLoadModels([unloaded], undefined)).toBe(false);
+    expect(hasManualLoadModels([], false)).toBe(false);
+  });
+});
+
+// ─── manualLoadDisabledValues / footnote / reason ────────────────────────────
+
+describe("manualLoadDisabledValues", () => {
+  it("is empty unless the answer is explicitly false", () => {
+    const m = makeModel({ id: "u", loaded: false });
+    expect(manualLoadDisabledValues([m], true).size).toBe(0);
+    expect(manualLoadDisabledValues([m], undefined).size).toBe(0);
+    expect(manualLoadDisabledValues([m], false).size).toBe(1);
+  });
+
+  it("disables exactly the models that are not reported loaded", () => {
+    const loaded = makeModel({ id: "l", loaded: true });
+    const unloaded = makeModel({ id: "u", loaded: false });
+    const unknown = makeModel({ id: "k" }); // no `loaded` field at all
+    expect([...manualLoadDisabledValues([loaded, unloaded, unknown], false)].sort()).toEqual([
+      "k",
+      "u",
+    ]);
+  });
+});
+
+describe("manualLoadFootnote / manualLoadReason", () => {
+  const fakeAdapter = { kind: "unsloth", displayName: "Unsloth Studio" } as unknown as Parameters<
+    typeof manualLoadFootnote
+  >[0];
+
+  it("footnote explains the ○ mark and names the backend", () => {
+    expect(manualLoadFootnote(fakeAdapter)).toBe(
+      "○ = not loaded — Unsloth Studio won't auto-load it; load it in Unsloth Studio first",
+    );
+  });
+
+  it("reason names the model and the backend", () => {
+    expect(manualLoadReason(fakeAdapter, "big-model")).toBe(
+      "Crossbar: big-model is not loaded and Unsloth Studio won't auto-load it — load it in Unsloth Studio first.",
+    );
+  });
+});
+
+// ─── selectOverlay — disabled items ──────────────────────────────────────────
+//
+// Drives the REAL pi-tui SelectList headlessly: the ctx.ui.custom mock invokes
+// the overlay factory with a stub theme/tui, then the test feeds raw key
+// sequences into the returned component's handleInput.
+
+describe("selectOverlay — disabled items", () => {
+  const ENTER = "\r";
+  const DOWN = "\x1b[B";
+  const ESC = "\x1b";
+
+  function openOverlay(
+    items: Array<{ value: string; label: string }>,
+    disabled?: { values: ReadonlySet<string>; reason: (value: string) => string },
+  ) {
+    let component: { handleInput: (data: string) => void } | undefined;
+    let result: string | null | undefined;
+    const notifications: Array<{ text: string; level: string }> = [];
+
+    const ctx = {
+      ui: {
+        custom: (
+          factory: (
+            tui: unknown,
+            theme: unknown,
+            kb: unknown,
+            done: (value: string | null) => void,
+          ) => { handleInput: (data: string) => void },
+        ) =>
+          new Promise<string | null>((resolve) => {
+            const theme = {
+              fg: (_color: string, text?: string) => text ?? "",
+              bold: (t: string) => t,
+            };
+            const tui = { requestRender: () => undefined };
+            component = factory(tui, theme, {} as never, (value: string | null) => {
+              result = value;
+              resolve(value);
+            });
+          }),
+        notify: (text: string, level: string) => {
+          notifications.push({ text, level });
+        },
+      },
+    } as unknown as ExtensionCommandContext;
+
+    void selectOverlay(ctx, "Test picker", items, "hint", undefined, disabled);
+    expect(component).toBeDefined();
+
+    return {
+      press: (data: string) => component!.handleInput(data),
+      result: () => result,
+      notifications,
+    };
+  }
+
+  const items = [
+    { value: "loaded", label: "● loaded-model" },
+    { value: "unloaded", label: "○ unloaded-model" },
+  ];
+  const disabled = {
+    values: new Set(["unloaded"]),
+    reason: (id: string) => `Crossbar: ${id} is not loadable.`,
+  };
+
+  it("swallows Enter on a disabled item and explains why", () => {
+    const h = openOverlay(items, disabled);
+    h.press(DOWN); // move onto the ○ item
+    h.press(ENTER);
+    expect(h.result()).toBeUndefined(); // overlay still open
+    expect(h.notifications).toEqual([
+      { text: "Crossbar: unloaded is not loadable.", level: "warning" },
+    ]);
+  });
+
+  it("keeps the overlay open after a blocked Enter so the user can recover", () => {
+    const h = openOverlay(items, disabled);
+    h.press(DOWN);
+    h.press(ENTER); // blocked
+    h.press(ENTER); // blocked again
+    expect(h.notifications).toHaveLength(2);
+    h.press(ESC);
+    expect(h.result()).toBeNull();
+  });
+
+  it("confirms an enabled item normally", () => {
+    const h = openOverlay(items, disabled);
+    h.press(ENTER); // index 0 = loaded
+    expect(h.result()).toBe("loaded");
+    expect(h.notifications).toHaveLength(0);
+  });
+
+  it("allows navigating onto a disabled item — it stays visible", () => {
+    const h = openOverlay(items, disabled);
+    h.press(DOWN); // now on the ○ item
+    h.press(ENTER); // blocked
+    h.press(DOWN); // wrap back to the ● item
+    h.press(ENTER);
+    expect(h.result()).toBe("loaded");
+  });
+
+  it("without a disabled set, Enter confirms any item (back-compat)", () => {
+    const h = openOverlay(items);
+    h.press(DOWN);
+    h.press(ENTER);
+    expect(h.result()).toBe("unloaded");
+    expect(h.notifications).toHaveLength(0);
+  });
+
+  it("Esc always cancels, even when sitting on a disabled item", () => {
+    const h = openOverlay(items, disabled);
+    h.press(DOWN);
+    h.press(ESC);
+    expect(h.result()).toBeNull();
+    expect(h.notifications).toHaveLength(0);
   });
 });
 

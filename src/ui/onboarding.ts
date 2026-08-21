@@ -5,6 +5,9 @@
  *  - Pure, unit-testable helpers:
  *      buildDiscoveredItems   — SelectItem[] from discovered servers + existing registry
  *      buildModelItems        — SelectItem[] from ModelDescriptor[]
+ *      hasManualLoadModels    — whether the picker needs the ○ manual-load footnote
+ *      manualLoadDisabledValues — ○ model ids that the picker must not confirm
+ *      manualLoadFootnote / manualLoadReason — the picker's ○ explanations
  *      capabilityActions      — capability-filtered action list
  *      normalizeManualUrl     — coerce bare host:port / missing-scheme inputs to a valid origin
  *
@@ -23,8 +26,8 @@ import { DynamicBorder, getSelectListTheme } from "@earendil-works/pi-coding-age
 import { Container, type SelectItem, SelectList, Text, matchesKey, CancellableLoader } from "@earendil-works/pi-tui";
 
 import type { BackendAdapter } from "../core/backend-adapter.ts";
-import { canIntrospect, canLoadUnload, canSwitch } from "../core/backend-adapter.ts";
-import type { CrossbarSettings, DiscoveredServer, HealthState, LoadedState, ModelDescriptor, ServerRecord } from "../core/types.ts";
+import { canAutoLoadStatus, canIntrospect, canLoadUnload, canSwitch } from "../core/backend-adapter.ts";
+import type { CrossbarSettings, DiscoveredServer, HealthState, LoadedState, ModelDescriptor, ServerCredential, ServerRecord } from "../core/types.ts";
 import type { ServerRegistry } from "../registry/registry.ts";
 import { serverId } from "../registry/ids.ts";
 import { adapterFor } from "../adapters/index.ts";
@@ -277,8 +280,18 @@ export function buildSettingsItems(settings: CrossbarSettings): SelectItem[] {
  * The description line surfaces the context window (when known) and any
  * capability badges (vision, tools, reasoning, embeddings). A currently-loaded model
  * (where the backend reports it) is marked with a leading ● and a "loaded" badge.
+ *
+ * When `options.autoLoadsOnDemand === false` (the backend answered authoritatively
+ * that it will NOT auto-load unloaded models on request — e.g. Unsloth Studio with
+ * "Switch model by request" off), every not-loaded model is additionally marked with
+ * a leading ○ and a "no auto-load" badge: picking it would only fail on the first
+ * request, so the picker says so up front. `undefined` (unknown) leaves the list
+ * unmarked — same as before this option existed.
  */
-export function buildModelItems(models: ModelDescriptor[]): SelectItem[] {
+export function buildModelItems(
+  models: ModelDescriptor[],
+  options?: { autoLoadsOnDemand?: boolean | undefined },
+): SelectItem[] {
   return models.map((m): SelectItem => {
     const parts: string[] = [];
 
@@ -301,16 +314,58 @@ export function buildModelItems(models: ModelDescriptor[]): SelectItem[] {
     // (LM Studio's `state:"loaded"`). The ● matches the loaded-model widget; the
     // "loaded" badge leads the description so it reads even without colour.
     const name = m.name || m.id;
+    // ○ is the hollow counterpart of ●: not resident, and the server will not load
+    // it on demand either — it must be loaded in the backend's own UI first.
+    const needsManualLoad = options?.autoLoadsOnDemand === false && m.loaded !== true;
     const item: SelectItem = {
       value: m.id,
-      label: m.loaded ? `● ${name}` : name,
+      label: m.loaded ? `● ${name}` : needsManualLoad ? `○ ${name}` : name,
     };
     if (m.loaded) parts.unshift("loaded");
+    else if (needsManualLoad) parts.unshift("no auto-load");
     if (parts.length > 0) {
       item.description = parts.join("  ");
     }
     return item;
   });
+}
+
+/**
+ * True when at least one of these models is not currently loaded and the server
+ * will not auto-load it on demand — i.e. the picker shows ○ marks and must carry
+ * the explanatory footnote. `undefined` (unknown) is never true: we only warn when
+ * the backend told us explicitly.
+ */
+export function hasManualLoadModels(
+  models: ModelDescriptor[],
+  autoLoadsOnDemand: boolean | undefined,
+): boolean {
+  return autoLoadsOnDemand === false && models.some((m) => m.loaded !== true);
+}
+
+/**
+ * The ids of models that must NOT be confirmable in the picker: not currently
+ * loaded AND the server answered authoritatively that it will not auto-load them
+ * on demand. Selecting such a model would only fail on the first request, so the
+ * picker keeps it visible (marked ○) but swallows Enter on it and explains why.
+ * `undefined` (unknown) yields an empty set — never block a selection on a guess.
+ */
+export function manualLoadDisabledValues(
+  models: ModelDescriptor[],
+  autoLoadsOnDemand: boolean | undefined,
+): Set<string> {
+  if (autoLoadsOnDemand !== false) return new Set();
+  return new Set(models.filter((m) => m.loaded !== true).map((m) => m.id));
+}
+
+/** Footnote line for pickers that show ○ marks. */
+export function manualLoadFootnote(adapter: BackendAdapter): string {
+  return `○ = not loaded — ${adapter.displayName} won't auto-load it; load it in ${adapter.displayName} first`;
+}
+
+/** Per-model explanation shown when the user tries to select a ○ model. */
+export function manualLoadReason(adapter: BackendAdapter, modelId: string): string {
+  return `Crossbar: ${modelId} is not loaded and ${adapter.displayName} won't auto-load it — load it in ${adapter.displayName} first.`;
 }
 
 /**
@@ -434,14 +489,28 @@ function serverFromRecord(record: ServerRecord): DiscoveredServer {
 
 /**
  * Render a single-select overlay (titled SelectList in an accent border) and resolve
- * to the chosen item value, or `null` on Esc/cancel. Shared by the model picker and
- * the manage menus so they stay visually consistent.
+/**
+ * Items the user may navigate to but NOT confirm (Enter is swallowed and
+ * `reason` is shown as a notification). Used for models the server cannot serve
+ * until loaded elsewhere — visible for orientation, not selectable.
  */
-function selectOverlay(
+interface DisabledItems {
+  values: ReadonlySet<string>;
+  reason: (value: string) => string;
+}
+
+/**
+ * Shared list overlay: renders a bordered SelectList, resolves to the chosen item
+ * value, or `null` on Esc/cancel. Shared by the model picker and the manage menus
+ * so they stay visually consistent. Exported for tests.
+ */
+export function selectOverlay(
   ctx: ExtensionCommandContext,
   title: string,
   items: SelectItem[],
   hint: string,
+  footnote?: string,
+  disabled?: DisabledItems,
 ): Promise<string | null> {
   return ctx.ui.custom<string | null>(
     (_tui, theme, _kb, done) => {
@@ -454,6 +523,9 @@ function selectOverlay(
       list.onCancel = () => done(null);
 
       container.addChild(list);
+      if (footnote) {
+        container.addChild(new Text(theme.fg("dim", footnote)));
+      }
       container.addChild(new Text(theme.fg("dim", hint)));
       container.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
 
@@ -464,6 +536,16 @@ function selectOverlay(
           if (matchesKey(data, "escape")) {
             done(null);
             return;
+          }
+          // Disabled items are visible but not confirmable: swallow Enter and
+          // explain why, instead of making a selection that would fail on the
+          // server's first request.
+          if (disabled && matchesKey(data, "return")) {
+            const sel = list.getSelectedItem();
+            if (sel && disabled.values.has(sel.value)) {
+              ctx.ui.notify(disabled.reason(sel.value), "warning");
+              return;
+            }
           }
           list.handleInput(data);
           _tui.requestRender();
@@ -556,6 +638,26 @@ async function fetchModels(
 }
 
 /**
+ * Ask a backend whether unloaded models auto-load on demand — only when it can
+ * answer authoritatively (Capability.AutoLoadStatus, e.g. Unsloth Studio's
+ * "Switch model by request" setting). Never throws; `undefined` means unknown,
+ * in which case the picker stays unmarked and fully selectable.
+ */
+async function resolveAutoLoadsOnDemand(
+  server: DiscoveredServer,
+  cred: ServerCredential,
+): Promise<boolean | undefined> {
+  const adapter = adapterFor(server.kind);
+  if (!canAutoLoadStatus(adapter)) return undefined;
+  try {
+    const probe = createProbe(server.baseUrl, { auth: cred });
+    return await adapter.autoLoadsOnDemand(server, cred, probe);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Pick one of the server's registered models and make it the model Pi uses — a
  * pure Pi-side selection (no server-side switch/load). Works for every backend,
  * including those without SwitchModel/LoadUnload (vLLM, llama.cpp, generic, …).
@@ -574,11 +676,32 @@ async function performUseModel(
     return;
   }
 
+  // Ask before showing the picker: if the server will NOT auto-load unloaded
+  // models, mark them (○) and make them non-confirmable — picking one would
+  // only fail on the first request.
+  const adapter = adapterFor(record.kind);
+  const cred = await registry.resolveCredential(record);
+  const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(serverFromRecord(record), cred);
+  const disabledValues = manualLoadDisabledValues(selectableModels, autoLoadsOnDemand);
+
+  // Nothing selectable at all — don't open a picker the user could only Esc out of.
+  if (disabledValues.size === selectableModels.length) {
+    ctx.ui.notify(
+      `Crossbar: no loaded models on ${record.label} — ${adapter.displayName} won't auto-load them. Load one in ${adapter.displayName} first.`,
+      "warning",
+    );
+    return;
+  }
+
   const modelId = await selectOverlay(
     ctx,
     `Use a model in Pi — ${record.label}`,
-    buildModelItems(selectableModels),
+    buildModelItems(selectableModels, { autoLoadsOnDemand }),
     "↑↓ navigate · Enter select · Esc cancel",
+    hasManualLoadModels(selectableModels, autoLoadsOnDemand) ? manualLoadFootnote(adapter) : undefined,
+    disabledValues.size > 0
+      ? { values: disabledValues, reason: (id) => manualLoadReason(adapter, id) }
+      : undefined,
   );
   if (!modelId) return;
 
@@ -611,15 +734,21 @@ async function performModelAction(
   const title = action === "switch"
     ? `Switch model — ${record.label}`
     : `Load model — ${record.label}`;
+  const cred = await registry.resolveCredential(record);
+  const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(serverFromRecord(record), cred);
+  const disabledValues = manualLoadDisabledValues(selectableModels, autoLoadsOnDemand);
   const modelId = await selectOverlay(
     ctx,
     title,
-    buildModelItems(selectableModels),
+    buildModelItems(selectableModels, { autoLoadsOnDemand }),
     "↑↓ navigate · Enter select · Esc cancel",
+    hasManualLoadModels(selectableModels, autoLoadsOnDemand) ? manualLoadFootnote(adapter) : undefined,
+    disabledValues.size > 0
+      ? { values: disabledValues, reason: (id) => manualLoadReason(adapter, id) }
+      : undefined,
   );
   if (!modelId) return;
 
-  const cred = await registry.resolveCredential(record);
   // Loads can be slow (cold model into VRAM) — give them a generous budget.
   const probe = createProbe(record.baseUrl, { auth: cred, defaultTimeoutMs: 60_000 });
 
@@ -1279,21 +1408,69 @@ export async function openOnboarding(
         continue;
       }
 
-      const authChoice = await ctx.ui.select(
-        "Authentication",
-        ["No authentication (open server)", "Enter API key"],
-      );
-      if (authChoice === undefined) continue;
+      // Pre-probe unauthenticated, once, before asking the auth question. Some backends
+      // (e.g. Unsloth Studio) declare `authRequired: true` because they reject EVERY
+      // request — including their own metadata endpoints — without a key. For those, the
+      // adapter can still identify itself from public response shape/headers even on a
+      // bare 401 (see e.g. unsloth.ts). Detecting that up front lets Crossbar skip the
+      // "No authentication" choice entirely for a backend that can never work with it,
+      // instead of letting the user pick it and land on the generic "could not identify
+      // the server" dead end once every adapter's fingerprint 401s.
+      let preProbeAdapter: BackendAdapter | undefined;
+      let preProbeServer: DiscoveredServer | undefined;
+      try {
+        const bareProbe = createProbe(targetBaseUrl, {
+          auth: { mode: "none" },
+          defaultTimeoutMs: 3000,
+        });
+        const { DISCOVERY_ADAPTERS } = await import("../adapters/index.ts");
+        for (const adapter of DISCOVERY_ADAPTERS) {
+          try {
+            const result = await adapter.fingerprint(targetBaseUrl, bareProbe);
+            if (result) {
+              preProbeAdapter = adapter;
+              preProbeServer = result;
+              break;
+            }
+          } catch {
+            // Try the next adapter.
+          }
+        }
+      } catch {
+        // Pre-probe is best-effort only — network trouble here just falls through to the
+        // normal auth question below, exactly like before this pre-probe existed.
+      }
 
-      selectedAuth = authChoice === "Enter API key" ? "apiKey" : "none";
-      if (selectedAuth === "apiKey") {
-        const key = await ctx.ui.input("API key", "Paste your key (hidden after this dialog)");
+      if (preProbeAdapter?.authRequired && preProbeServer) {
+        ctx.ui.notify(
+          `Crossbar: ${preProbeServer.label} requires an API key.`,
+          "info",
+        );
+        selectedAuth = "apiKey";
+        const key = await ctx.ui.input("API key", `Required by ${preProbeAdapter.displayName}`);
         if (key === undefined) continue;
         if (key.length === 0) {
           ctx.ui.notify("Crossbar: API key cannot be empty.", "warning");
           continue;
         }
         manualApiKey = key;
+      } else {
+        const authChoice = await ctx.ui.select(
+          "Authentication",
+          ["No authentication (open server)", "Enter API key"],
+        );
+        if (authChoice === undefined) continue;
+
+        selectedAuth = authChoice === "Enter API key" ? "apiKey" : "none";
+        if (selectedAuth === "apiKey") {
+          const key = await ctx.ui.input("API key", "Paste your key (hidden after this dialog)");
+          if (key === undefined) continue;
+          if (key.length === 0) {
+            ctx.ui.notify("Crossbar: API key cannot be empty.", "warning");
+            continue;
+          }
+          manualApiKey = key;
+        }
       }
     } else {
       const existingRecord = registry.list().find((r) => r.baseUrl === chosenBaseUrl);
@@ -1409,11 +1586,20 @@ export async function openOnboarding(
       continue;
     }
 
+    // Same ○ treatment as the manage flow. No dead-end guard here: Esc still
+    // adds the server (just without a model pre-selected), so a fully disabled
+    // list is a valid — if unhelpful — outcome.
+    const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(discoveredServer, cred);
+    const disabledValues = manualLoadDisabledValues(selectableModels, autoLoadsOnDemand);
     const chosenModelId = await selectOverlay(
       ctx,
       `Select model to use in Pi — ${discoveredServer.label}`,
-      buildModelItems(selectableModels),
+      buildModelItems(selectableModels, { autoLoadsOnDemand }),
       "↑↓ navigate · Enter select · Esc skip",
+      hasManualLoadModels(selectableModels, autoLoadsOnDemand) ? manualLoadFootnote(adapter) : undefined,
+      disabledValues.size > 0
+        ? { values: disabledValues, reason: (id) => manualLoadReason(adapter, id) }
+        : undefined,
     );
 
     const id = serverId(discoveredServer.kind, targetBaseUrl);

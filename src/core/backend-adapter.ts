@@ -28,8 +28,15 @@ import type {
   ServerCredential,
 } from "./types.ts";
 
-/** Bumped on any breaking change to this interface. Adapters and the registry assert on it. */
-export const CONTRACT_VERSION = 2 as const;
+/**
+ * Bumped on any change to this interface. Adapters and the registry assert on it.
+ * v3: added optional `authRequired` (non-breaking — existing adapters are unaffected; only
+ * backends that can never work without a key, e.g. Unsloth Studio, need to set it).
+ * v4: added optional `autoLoadsOnDemand` + `Capability.AutoLoadStatus` (non-breaking —
+ * existing adapters are unaffected; only backends that can answer authoritatively,
+ * e.g. Unsloth Studio's "Switch model by request" setting, implement it).
+ */
+export const CONTRACT_VERSION = 4 as const;
 
 /** Which built-in Pi API type the adapter registers its models under. */
 export type PiApiType = "openai-completions" | "anthropic-messages";
@@ -45,6 +52,14 @@ export interface BackendAdapter {
   readonly piApi: PiApiType;
   /** The capabilities this backend exposes. Drives UX and which optional methods are present. */
   readonly capabilities: ReadonlySet<Capability>;
+  /**
+   * True when this backend rejects EVERY request without a valid API key — there is no
+   * unauthenticated mode at all (e.g. Unsloth Studio). Defaults to false (most local backends
+   * are keyless by default). Onboarding uses this to skip/short-circuit the "No authentication"
+   * choice for adapters that can never work without a key, instead of silently failing
+   * fingerprint and surfacing a generic "could not identify the server" error.
+   */
+  readonly authRequired?: boolean;
 
   /**
    * Decide whether `baseUrl` is *this* backend. MUST use only unauthenticated metadata endpoints
@@ -78,6 +93,20 @@ export interface BackendAdapter {
     modelId: string,
     probe: Probe,
   ): Promise<void>;
+
+  /**
+   * Will this server auto-load (or switch to) an UNLOADED model when a request names it?
+   * Present iff {@link Capability.AutoLoadStatus}. Informational — the UI uses it to warn
+   * that a model must be loaded via the backend's own interface before it can serve
+   * requests. `true` = unloaded models are served on demand; `false` = requests for
+   * unloaded models fail until the user loads them elsewhere; `undefined` = the server
+   * did not answer authoritatively (treat as unknown, never guess).
+   */
+  autoLoadsOnDemand?(
+    server: DiscoveredServer,
+    cred: ServerCredential,
+    probe: Probe,
+  ): Promise<boolean | undefined>;
 
   /** Explicit load/unload. Present iff {@link Capability.LoadUnload}. */
   loadUnload?(
@@ -120,4 +149,10 @@ export function canLoadUnload(
   a: BackendAdapter,
 ): a is BackendAdapter & Required<Pick<BackendAdapter, "loadUnload">> {
   return typeof a.loadUnload === "function";
+}
+
+export function canAutoLoadStatus(
+  a: BackendAdapter,
+): a is BackendAdapter & Required<Pick<BackendAdapter, "autoLoadsOnDemand">> {
+  return typeof a.autoLoadsOnDemand === "function";
 }

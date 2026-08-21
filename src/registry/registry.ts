@@ -239,7 +239,7 @@ export class ServerRegistry {
   private async flush(): Promise<void> {
     const config: CrossbarConfigFile = {
       version: 1,
-      modelCacheVersion: 1,
+      modelCacheVersion: 2,
       servers: this.list(),
     };
     // Preserve discovery settings across every mutation — otherwise any server

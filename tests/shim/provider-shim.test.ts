@@ -12,7 +12,7 @@
  *   - No-auth providers use a resolved, non-secret placeholder key.
  */
 
-import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from "vitest";
 import { buildProviderConfig, registerCachedServer, registerServer, unregisterServer, reRegisterServer } from "../../src/shim/provider-shim.ts";
 import { ollamaAdapter } from "../../src/adapters/ollama.ts";
 import { openaiAdapter } from "../../src/adapters/openai.ts";
@@ -324,6 +324,16 @@ function makeRegistry(resolvedKey?: string): ServerRegistry {
 }
 
 describe("registerServer", () => {
+  // registerServer() bridges the resolved key into process.env[envVarFor(record.id)] so Pi's
+  // own $ENV config-value resolution can find it (see shim/provider-shim.ts's header). That's
+  // a real, intentional side effect on the shared, process-global process.env — clean it up
+  // after every test in this file so it can't leak into the (deliberately isolated, real-
+  // ModelRegistry) "keyed availability" tests below, which reuse the same provider id to
+  // exercise the OPPOSITE case (no credential at all).
+  afterEach(() => {
+    delete process.env[envVarFor(openaiRecord.id)];
+  });
+
   it("calls pi.registerProvider with the record id", async () => {
     const { pi, registerProvider } = makePi();
     const registry = makeRegistry();
@@ -355,6 +365,20 @@ describe("registerServer", () => {
     expect(config["apiKey"]).not.toBe(plaintextKey);
     // Serialised form must not contain the plaintext
     expect(JSON.stringify(config)).not.toContain(plaintextKey);
+  });
+
+  it("bridges the resolved key into process.env for the $ENV sentinel to resolve", async () => {
+    const plaintextKey = "sk-realkey-for-env-bridge";
+    const { pi, registry } = { ...makePi(), registry: makeRegistry(plaintextKey) };
+    await registerServer(pi, registry, openaiRecord, [gpt4oModel]);
+    expect(process.env[envVarFor(openaiRecord.id)]).toBe(plaintextKey);
+  });
+
+  it("does not touch process.env for a no-auth server", async () => {
+    const { pi, registry } = { ...makePi(), registry: makeRegistry() };
+    delete process.env[envVarFor(ollamaRecord.id)];
+    await registerServer(pi, registry, ollamaRecord, [chatModel]);
+    expect(process.env[envVarFor(ollamaRecord.id)]).toBeUndefined();
   });
 
   it("rejects a keyed server when its stored credential is missing", async () => {

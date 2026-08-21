@@ -70,7 +70,7 @@ each one:
    rejections, not silent success.
 7. **No secret leakage.** Adapters receive `ServerCredential` but must never log/serialize `apiKey`.
 
-`CONTRACT_VERSION = 2`. Any breaking change bumps it; registry asserts adapters match.
+`CONTRACT_VERSION = 4`. Any breaking change bumps it; registry asserts adapters match.
 
 ## 3. Provider-registration shim (`shim/provider-shim.ts`)
 
