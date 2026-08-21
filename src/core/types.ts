@@ -175,8 +175,13 @@ export interface CrossbarSettings {
 
 export interface CrossbarConfigFile {
   version: 1;
-  /** Version of the cached model-capability data. Missing or unknown values are migrated on load. */
-  modelCacheVersion?: 1;
+  /**
+   * Version of the cached model-capability data. Missing or unknown values are migrated on
+   * load. Bumped to 2 when the Unsloth Studio adapter stopped fabricating an 8192/4096
+   * context for models the server reports no context for, so already-written caches carrying
+   * those invented values get re-sanitized once.
+   */
+  modelCacheVersion?: 1 | 2;
   servers: ServerRecord[];
   settings?: CrossbarSettings;
 }

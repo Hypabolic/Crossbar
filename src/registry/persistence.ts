@@ -49,18 +49,26 @@ function stripSecrets(record: ServerRecord): ServerRecord {
   return safe;
 }
 
-const MODEL_CACHE_VERSION = 1 as const;
+const MODEL_CACHE_VERSION = 2 as const;
+
+/** Backends whose cached model entries may contain a fabricated 8192/4096 context pair. */
+const FABRICATED_CONTEXT_KINDS = new Set<ServerRecord["kind"]>([
+  "llamaswap",
+  "llamacpp",
+  "unsloth",
+]);
 
 function sanitizeLegacyModel(model: ModelDescriptor, kind: ServerRecord["kind"]): ModelDescriptor {
-  // llama-swap's 8192 was fabricated; positive llama.cpp contexts may be authoritative.
+  // llama-swap's and Unsloth Studio's 8192 was fabricated (Unsloth reports context fields only
+  // for LOADED models, so every unloaded entry got the invented default baked into the cache);
+  // positive llama.cpp contexts may be authoritative.
   const removeContextWindow =
-    kind === "llamaswap"
+    kind === "llamaswap" || kind === "unsloth"
       ? model.contextWindow === 8192
       : kind === "llamacpp" &&
         typeof model.contextWindow === "number" &&
         model.contextWindow <= 0;
-  const removeMaxTokens =
-    (kind === "llamaswap" || kind === "llamacpp") && model.maxTokens === 4096;
+  const removeMaxTokens = FABRICATED_CONTEXT_KINDS.has(kind) && model.maxTokens === 4096;
 
   if (!removeContextWindow && !removeMaxTokens) return model;
 
@@ -71,10 +79,7 @@ function sanitizeLegacyModel(model: ModelDescriptor, kind: ServerRecord["kind"])
 }
 
 function sanitizeLegacyModelCache(record: ServerRecord): ServerRecord {
-  if (
-    (record.kind !== "llamaswap" && record.kind !== "llamacpp") ||
-    !Array.isArray(record.lastKnownModels)
-  ) {
+  if (!FABRICATED_CONTEXT_KINDS.has(record.kind) || !Array.isArray(record.lastKnownModels)) {
     return record;
   }
 

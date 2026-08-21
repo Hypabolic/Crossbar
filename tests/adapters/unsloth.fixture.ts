@@ -135,5 +135,9 @@ export const unslothFixture: AdapterFixture = {
       source: "introspection",
     },
     inferenceBaseUrlPrefix: "http://",
+    // Unsloth Studio reports no context/token limits for unloaded models, so the adapter
+    // deliberately emits maxTokens: 0 ("unbounded — let the server decide") rather than
+    // inventing one. Same contract as llama.cpp and llama-swap.
+    maxTokensMayBeUnbounded: true,
   },
 };

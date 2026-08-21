@@ -108,6 +108,94 @@ describe("[unsloth] adapter-specific", () => {
     expect(result?.source).toBe("introspection");
   });
 
+  // Regression: the adapter used to fabricate contextWindow 8192 / maxTokens 4096 for any
+  // model without context fields. Captured verbatim from a live instance: Unsloth Studio
+  // emits the *context_length fields ONLY for the currently-loaded model, so EVERY unloaded
+  // entry got a bogus "8k ctx" — shown in the picker and frozen into crossbar.json's
+  // lastKnownModels — even for models with a real 262144-token context.
+  describe("context window reporting", () => {
+    const server = {
+      kind: "unsloth" as const,
+      baseUrl: "http://127.0.0.1:8888",
+      auth: "apiKey" as const,
+      label: "Unsloth Studio",
+      confidence: 0.95,
+    };
+    const cred = { mode: "apiKey" as const, apiKey: "k" };
+
+    const probeFor = (entries: unknown[]) =>
+      createFakeProbe({
+        "/v1/models": {
+          status: 200,
+          ok: true,
+          headers: { server: "unsloth-studio" },
+          json: { data: entries },
+        },
+      });
+
+    it("omits contextWindow entirely when the server reports no context fields", async () => {
+      const models = await unslothAdapter.listModels(
+        server,
+        cred,
+        probeFor([{ id: "unloaded", owned_by: "unsloth-studio", loaded: false }]),
+      );
+      expect(models).toHaveLength(1);
+      expect(models[0]).not.toHaveProperty("contextWindow");
+      expect(models[0]).not.toHaveProperty("maxTokens");
+    });
+
+    it("reports the real context of a loaded model verbatim", async () => {
+      const models = await unslothAdapter.listModels(
+        server,
+        cred,
+        probeFor([
+          {
+            id: "Qwen3.6-35B-A3B-UD-Q4_K_M",
+            owned_by: "unsloth-studio",
+            loaded: true,
+            context_length: 262144,
+            max_context_length: 262144,
+            native_context_length: 262144,
+          },
+        ]),
+      );
+      expect(models[0]?.contextWindow).toBe(262144);
+    });
+
+    it("falls back to max/native context when the configured one is absent or zero", async () => {
+      const models = await unslothAdapter.listModels(
+        server,
+        cred,
+        probeFor([
+          { id: "max-only", owned_by: "unsloth-studio", max_context_length: 229888 },
+          { id: "native-only", owned_by: "unsloth-studio", context_length: 0, native_context_length: 262144 },
+        ]),
+      );
+      expect(models[0]?.contextWindow).toBe(229888);
+      expect(models[1]?.contextWindow).toBe(262144);
+    });
+
+    it("maps an unknown context to Pi's 128k fallback and unbounded maxTokens, never 8192", () => {
+      const entry = unslothAdapter.toPiModel(server, {
+        id: "unloaded",
+        name: "unloaded",
+        input: ["text"],
+      });
+      expect(entry.contextWindow).toBe(128_000);
+      expect(entry.maxTokens).toBe(0);
+    });
+
+    it("passes a known context through to the Pi entry untouched", () => {
+      const entry = unslothAdapter.toPiModel(server, {
+        id: "loaded",
+        name: "loaded",
+        input: ["text"],
+        contextWindow: 262144,
+      });
+      expect(entry.contextWindow).toBe(262144);
+    });
+  });
+
   it("inferenceBaseUrl appends /v1 exactly once", () => {
     const server = {
       kind: "unsloth" as const,
