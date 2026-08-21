@@ -6,6 +6,8 @@
  *      buildDiscoveredItems   — SelectItem[] from discovered servers + existing registry
  *      buildModelItems        — SelectItem[] from ModelDescriptor[]
  *      hasManualLoadModels    — whether the picker needs the ○ manual-load footnote
+ *      manualLoadDisabledValues — ○ model ids that the picker must not confirm
+ *      manualLoadFootnote / manualLoadReason — the picker's ○ explanations
  *      capabilityActions      — capability-filtered action list
  *      normalizeManualUrl     — coerce bare host:port / missing-scheme inputs to a valid origin
  *
@@ -25,7 +27,7 @@ import { Container, type SelectItem, SelectList, Text, matchesKey, CancellableLo
 
 import type { BackendAdapter } from "../core/backend-adapter.ts";
 import { canAutoLoadStatus, canIntrospect, canLoadUnload, canSwitch } from "../core/backend-adapter.ts";
-import type { CrossbarSettings, DiscoveredServer, HealthState, LoadedState, ModelDescriptor, ServerRecord } from "../core/types.ts";
+import type { CrossbarSettings, DiscoveredServer, HealthState, LoadedState, ModelDescriptor, ServerCredential, ServerRecord } from "../core/types.ts";
 import type { ServerRegistry } from "../registry/registry.ts";
 import { serverId } from "../registry/ids.ts";
 import { adapterFor } from "../adapters/index.ts";
@@ -342,6 +344,31 @@ export function hasManualLoadModels(
 }
 
 /**
+ * The ids of models that must NOT be confirmable in the picker: not currently
+ * loaded AND the server answered authoritatively that it will not auto-load them
+ * on demand. Selecting such a model would only fail on the first request, so the
+ * picker keeps it visible (marked ○) but swallows Enter on it and explains why.
+ * `undefined` (unknown) yields an empty set — never block a selection on a guess.
+ */
+export function manualLoadDisabledValues(
+  models: ModelDescriptor[],
+  autoLoadsOnDemand: boolean | undefined,
+): Set<string> {
+  if (autoLoadsOnDemand !== false) return new Set();
+  return new Set(models.filter((m) => m.loaded !== true).map((m) => m.id));
+}
+
+/** Footnote line for pickers that show ○ marks. */
+export function manualLoadFootnote(adapter: BackendAdapter): string {
+  return `○ = not loaded — ${adapter.displayName} won't auto-load it; load it in ${adapter.displayName} first`;
+}
+
+/** Per-model explanation shown when the user tries to select a ○ model. */
+export function manualLoadReason(adapter: BackendAdapter, modelId: string): string {
+  return `Crossbar: ${modelId} is not loaded and ${adapter.displayName} won't auto-load it — load it in ${adapter.displayName} first.`;
+}
+
+/**
  * Return only the actions that `adapter` actually supports — capability-driven
  * hiding in its simplest form.
  *
@@ -462,15 +489,28 @@ function serverFromRecord(record: ServerRecord): DiscoveredServer {
 
 /**
  * Render a single-select overlay (titled SelectList in an accent border) and resolve
- * to the chosen item value, or `null` on Esc/cancel. Shared by the model picker and
- * the manage menus so they stay visually consistent.
+/**
+ * Items the user may navigate to but NOT confirm (Enter is swallowed and
+ * `reason` is shown as a notification). Used for models the server cannot serve
+ * until loaded elsewhere — visible for orientation, not selectable.
  */
-function selectOverlay(
+interface DisabledItems {
+  values: ReadonlySet<string>;
+  reason: (value: string) => string;
+}
+
+/**
+ * Shared list overlay: renders a bordered SelectList, resolves to the chosen item
+ * value, or `null` on Esc/cancel. Shared by the model picker and the manage menus
+ * so they stay visually consistent. Exported for tests.
+ */
+export function selectOverlay(
   ctx: ExtensionCommandContext,
   title: string,
   items: SelectItem[],
   hint: string,
   footnote?: string,
+  disabled?: DisabledItems,
 ): Promise<string | null> {
   return ctx.ui.custom<string | null>(
     (_tui, theme, _kb, done) => {
@@ -496,6 +536,16 @@ function selectOverlay(
           if (matchesKey(data, "escape")) {
             done(null);
             return;
+          }
+          // Disabled items are visible but not confirmable: swallow Enter and
+          // explain why, instead of making a selection that would fail on the
+          // server's first request.
+          if (disabled && matchesKey(data, "return")) {
+            const sel = list.getSelectedItem();
+            if (sel && disabled.values.has(sel.value)) {
+              ctx.ui.notify(disabled.reason(sel.value), "warning");
+              return;
+            }
           }
           list.handleInput(data);
           _tui.requestRender();
@@ -591,18 +641,17 @@ async function fetchModels(
  * Ask a backend whether unloaded models auto-load on demand — only when it can
  * answer authoritatively (Capability.AutoLoadStatus, e.g. Unsloth Studio's
  * "Switch model by request" setting). Never throws; `undefined` means unknown,
- * in which case the picker stays unmarked.
+ * in which case the picker stays unmarked and fully selectable.
  */
 async function resolveAutoLoadsOnDemand(
-  registry: ServerRegistry,
-  record: ServerRecord,
+  server: DiscoveredServer,
+  cred: ServerCredential,
 ): Promise<boolean | undefined> {
-  const adapter = adapterFor(record.kind);
+  const adapter = adapterFor(server.kind);
   if (!canAutoLoadStatus(adapter)) return undefined;
   try {
-    const cred = await registry.resolveCredential(record);
-    const probe = createProbe(record.baseUrl, { auth: cred });
-    return await adapter.autoLoadsOnDemand(serverFromRecord(record), cred, probe);
+    const probe = createProbe(server.baseUrl, { auth: cred });
+    return await adapter.autoLoadsOnDemand(server, cred, probe);
   } catch {
     return undefined;
   }
@@ -628,19 +677,31 @@ async function performUseModel(
   }
 
   // Ask before showing the picker: if the server will NOT auto-load unloaded
-  // models, mark them (○) so the user doesn't pick one only to 404 on turn one.
-  const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(registry, record);
+  // models, mark them (○) and make them non-confirmable — picking one would
+  // only fail on the first request.
   const adapter = adapterFor(record.kind);
-  const footnote = hasManualLoadModels(selectableModels, autoLoadsOnDemand)
-    ? `○ = not loaded — ${adapter.displayName} won't auto-load it; load it in ${adapter.displayName} first`
-    : undefined;
+  const cred = await registry.resolveCredential(record);
+  const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(serverFromRecord(record), cred);
+  const disabledValues = manualLoadDisabledValues(selectableModels, autoLoadsOnDemand);
+
+  // Nothing selectable at all — don't open a picker the user could only Esc out of.
+  if (disabledValues.size === selectableModels.length) {
+    ctx.ui.notify(
+      `Crossbar: no loaded models on ${record.label} — ${adapter.displayName} won't auto-load them. Load one in ${adapter.displayName} first.`,
+      "warning",
+    );
+    return;
+  }
 
   const modelId = await selectOverlay(
     ctx,
     `Use a model in Pi — ${record.label}`,
     buildModelItems(selectableModels, { autoLoadsOnDemand }),
     "↑↓ navigate · Enter select · Esc cancel",
-    footnote,
+    hasManualLoadModels(selectableModels, autoLoadsOnDemand) ? manualLoadFootnote(adapter) : undefined,
+    disabledValues.size > 0
+      ? { values: disabledValues, reason: (id) => manualLoadReason(adapter, id) }
+      : undefined,
   );
   if (!modelId) return;
 
@@ -651,16 +712,6 @@ async function performUseModel(
       : `Crossbar: could not select ${modelId} — pick it from /model.`,
     selected ? "info" : "warning",
   );
-
-  // Last-line warning: the selection succeeded Pi-side, but the server cannot
-  // actually serve this model until someone loads it.
-  const picked = selectableModels.find((m) => m.id === modelId);
-  if (picked && picked.loaded !== true && autoLoadsOnDemand === false) {
-    ctx.ui.notify(
-      `Crossbar: ${modelId} is not loaded and ${adapter.displayName} won't auto-load it — load it in ${adapter.displayName} first.`,
-      "warning",
-    );
-  }
 }
 
 /** Switch the active model or load a model: pick from the list, then call the adapter. */
@@ -683,20 +734,21 @@ async function performModelAction(
   const title = action === "switch"
     ? `Switch model — ${record.label}`
     : `Load model — ${record.label}`;
-  const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(registry, record);
-  const footnote = hasManualLoadModels(selectableModels, autoLoadsOnDemand)
-    ? `○ = not loaded — ${adapter.displayName} won't auto-load it; load it in ${adapter.displayName} first`
-    : undefined;
+  const cred = await registry.resolveCredential(record);
+  const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(serverFromRecord(record), cred);
+  const disabledValues = manualLoadDisabledValues(selectableModels, autoLoadsOnDemand);
   const modelId = await selectOverlay(
     ctx,
     title,
     buildModelItems(selectableModels, { autoLoadsOnDemand }),
     "↑↓ navigate · Enter select · Esc cancel",
-    footnote,
+    hasManualLoadModels(selectableModels, autoLoadsOnDemand) ? manualLoadFootnote(adapter) : undefined,
+    disabledValues.size > 0
+      ? { values: disabledValues, reason: (id) => manualLoadReason(adapter, id) }
+      : undefined,
   );
   if (!modelId) return;
 
-  const cred = await registry.resolveCredential(record);
   // Loads can be slow (cold model into VRAM) — give them a generous budget.
   const probe = createProbe(record.baseUrl, { auth: cred, defaultTimeoutMs: 60_000 });
 
@@ -1534,11 +1586,20 @@ export async function openOnboarding(
       continue;
     }
 
+    // Same ○ treatment as the manage flow. No dead-end guard here: Esc still
+    // adds the server (just without a model pre-selected), so a fully disabled
+    // list is a valid — if unhelpful — outcome.
+    const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(discoveredServer, cred);
+    const disabledValues = manualLoadDisabledValues(selectableModels, autoLoadsOnDemand);
     const chosenModelId = await selectOverlay(
       ctx,
       `Select model to use in Pi — ${discoveredServer.label}`,
-      buildModelItems(selectableModels),
+      buildModelItems(selectableModels, { autoLoadsOnDemand }),
       "↑↓ navigate · Enter select · Esc skip",
+      hasManualLoadModels(selectableModels, autoLoadsOnDemand) ? manualLoadFootnote(adapter) : undefined,
+      disabledValues.size > 0
+        ? { values: disabledValues, reason: (id) => manualLoadReason(adapter, id) }
+        : undefined,
     );
 
     const id = serverId(discoveredServer.kind, targetBaseUrl);

@@ -35,9 +35,11 @@ adapter registers under (`oai` = `openai-completions`, `ant` = `anthropic-messag
 - **loadUnload ✅** (Ollama, LM Studio, TabbyAPI, oobabooga, llama-swap) → expose explicit load/unload;
   elsewhere degrade to implicit-on-use (Ollama) or nothing.
 - **autoLoadStatus ✅** (Unsloth Studio) → when the backend answers `false`, mark not-loaded models
-  with ○ + "no auto-load" in the picker and add a footnote pointing at the backend's own load UI;
-  `undefined` (unknown/older versions) never marks. Backends that always auto-load (Ollama, LM
-  Studio, llama-server, llama-swap, llamafile) need no query — they are never marked.
+  with ○ + "no auto-load" in the picker, add a footnote pointing at the backend's own load UI,
+  and make them non-confirmable (Enter is swallowed with an explanation); if *no* model is loaded
+  the picker doesn't open at all and the notification says so. `undefined` (unknown/older versions)
+  never marks or blocks. Backends that always auto-load (Ollama, LM Studio, llama-server,
+  llama-swap, llamafile) need no query — they are never marked.
 
 ## Discovery probe order (cheapest/most-specific first)
 
