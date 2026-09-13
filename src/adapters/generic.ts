@@ -118,6 +118,7 @@ class GenericAdapter implements BackendAdapter {
       max_model_len?: number;
       context_length?: number;
       max_context_length?: number;
+      max_context_window?: number;
       context_window?: number;
     }
     interface GenericModelEntryWithId extends GenericModelEntry {
@@ -144,7 +145,9 @@ class GenericAdapter implements BackendAdapter {
                 ? item.context_length
                 : typeof item.max_context_length === "number" && item.max_context_length > 0
                   ? item.max_context_length
-                  : undefined;
+                  : typeof item.max_context_window === "number" && item.max_context_window > 0
+                    ? item.max_context_window
+                    : undefined;
         
         const finalContextWindow = contextWindow ?? DEFAULT_CONTEXT_WINDOW;
         
