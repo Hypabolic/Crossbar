@@ -217,35 +217,38 @@ export async function probeOrigin(
     : createProbe(origin, { defaultTimeoutMs: timeoutMs, insecureTLS });
 
   // Run all adapter fingerprints concurrently for this single origin
-  const fingerprintResults = await Promise.all(
-    adapters.map(async (adapter): Promise<DiscoveredServer | null> => {
-      try {
-        return await adapter.fingerprint(origin, probe);
-      } catch {
-        return null;
-      }
-    }),
-  );
+  const runFingerprints = async (p: Probe): Promise<DiscoveredServer | null> => {
+    const results = await Promise.all(
+      adapters.map(async (adapter): Promise<DiscoveredServer | null> => {
+        try {
+          return await adapter.fingerprint(origin, p);
+        } catch {
+          return null;
+        }
+      }),
+    );
+    return selectBest(results.filter((r): r is DiscoveredServer => r !== null));
+  };
 
-  const candidates = fingerprintResults.filter((r): r is DiscoveredServer => r !== null);
-  const best = selectBest(candidates);
+  const best = await runFingerprints(probe);
   if (best) return best;
 
-  // No adapter matched. If this is an HTTPS origin whose certificate we couldn't verify,
-  // surface it as a "found but untrusted" placeholder so the UI can offer a trust opt-in,
-  // instead of reporting the reachable host as dead. Only when NOT already bypassing TLS.
+  // No adapter matched. On an HTTPS origin, a verified probe fails on ANY untrusted cert,
+  // so fingerprinting never had a fair chance to tell an LLM backend from an ordinary HTTPS
+  // device (router, NAS, printer, ...). Re-fingerprint that one origin through an insecure
+  // probe: only if a real adapter now identifies it as a backend do we surface it \u2014 tagged
+  // with tlsError so the user still gets the explicit trust prompt before it is added.
+  // If nothing matches even with TLS bypassed, it is not a backend and we drop it.
   if (!insecureTLS && origin.startsWith("https://")) {
-    const tlsProbe = probe("/");
-    const res = await tlsProbe;
-    if (res.tlsError) {
-      return {
-        kind: "openai-generic",
-        baseUrl: origin,
-        auth: "none",
-        label: shortLabel(origin, "https (untrusted cert)"),
-        confidence: 0,
-        tlsError: true,
-      };
+    const liveness = await probe("/");
+    if (liveness.tlsError) {
+      const insecureProbe = probeFactory
+        ? probeFactory(origin, timeoutMs)
+        : createProbe(origin, { defaultTimeoutMs: timeoutMs, insecureTLS: true });
+      const insecureBest = await runFingerprints(insecureProbe);
+      if (insecureBest) {
+        return { ...insecureBest, tlsError: true };
+      }
     }
   }
   return null;

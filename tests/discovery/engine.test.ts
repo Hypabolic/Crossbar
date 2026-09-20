@@ -94,11 +94,45 @@ describe("scheme selection", () => {
 });
 
 describe("untrusted TLS certificate", () => {
-  it("surfaces a found-but-untrusted placeholder when an HTTPS origin has a bad cert", async () => {
-    // No adapter matches (fingerprint returns null), but the bare liveness/tls probe
-    // reports a certificate error -> the origin must appear with tlsError set.
+  it("re-fingerprints an untrusted HTTPS origin and surfaces it (tlsError) only if an adapter matches", async () => {
+    // A verified probe reports a cert error; the insecure re-probe lets the adapter match.
+    // The adapter matches ONLY when it can actually read the body (insecure probe returns 200).
+    const adapter = makeAdapter("ollama", async (baseUrl, probe) => {
+      const r = await probe("/");
+      if (r.tlsError || r.status !== 200) return null; // verified probe: cert error -> no match
+      return {
+        kind: "ollama" as const,
+        baseUrl,
+        auth: "none" as const,
+        label: "Ollama",
+        confidence: 0.95,
+      };
+    });
+    // First probe built for the origin = verified (cert error); the re-probe = insecure (200).
+    let built = 0;
+    const factory: ProbeFactory = () => {
+      const isVerifiedPass = built++ === 0;
+      return async (): Promise<ProbeResult> =>
+        isVerifiedPass
+          ? { status: 0, ok: false, headers: {}, error: "cert", tlsError: true }
+          : { status: 200, ok: true, headers: {}, text: "{}", json: {} };
+    };
+
+    const results = await discoverLan([adapter], ["192.168.1.5"], {
+      ports: [443],
+      probeFactory: factory,
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.baseUrl).toBe("https://192.168.1.5:443");
+    expect(results[0]?.kind).toBe("ollama");
+    expect(results[0]?.tlsError).toBe(true);
+  });
+
+  it("DROPS an untrusted HTTPS origin that no adapter identifies (e.g. a router)", async () => {
+    // Never matches, even on the insecure re-probe -> it is not a backend, so it is dropped.
     const adapter = makeAdapter("ollama", async () => null);
-    const tlsProbeFactory: ProbeFactory = () => async (): Promise<ProbeResult> => ({
+    const factory: ProbeFactory = () => async (): Promise<ProbeResult> => ({
       status: 0,
       ok: false,
       headers: {},
@@ -108,13 +142,10 @@ describe("untrusted TLS certificate", () => {
 
     const results = await discoverLan([adapter], ["192.168.1.5"], {
       ports: [443],
-      probeFactory: tlsProbeFactory,
+      probeFactory: factory,
     });
 
-    expect(results).toHaveLength(1);
-    expect(results[0]?.baseUrl).toBe("https://192.168.1.5:443");
-    expect(results[0]?.tlsError).toBe(true);
-    expect(results[0]?.confidence).toBe(0);
+    expect(results).toHaveLength(0);
   });
 
   it("does NOT surface a placeholder for an http origin that merely refused", async () => {
