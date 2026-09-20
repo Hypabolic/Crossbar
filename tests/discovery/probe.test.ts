@@ -239,4 +239,51 @@ describe("createProbe", () => {
     expect(capturedHeaders["authorization"]).toBe("Bearer sk-topsecret");
     expect(capturedHeaders["content-type"]).toBe("application/json");
   });
+
+  it("flags tlsError when fetch fails with a certificate verification error", async () => {
+    // undici surfaces TLS trust failures as an error whose `cause.code` is an OpenSSL code.
+    stubFetch(async () => {
+      throw Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("unable to get local issuer certificate"), {
+          code: "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+        }),
+      });
+    });
+
+    const probe = createProbe("https://guru.fritz.box");
+    const result = await probe("/health");
+
+    expect(result.status).toBe(0);
+    expect(result.ok).toBe(false);
+    expect(result.tlsError).toBe(true);
+  });
+
+  it("does NOT set tlsError for a plain connection refused", async () => {
+    stubFetch(async () => {
+      throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+    });
+
+    const probe = createProbe("https://guru.fritz.box");
+    const result = await probe("/health");
+
+    expect(result.status).toBe(0);
+    expect(result.tlsError).toBeUndefined();
+  });
+
+  it("does NOT set tlsError when insecureTLS is enabled (verification is bypassed)", async () => {
+    // With insecureTLS the probe uses the node:http(s) path, not global fetch, so a cert
+    // error can no longer occur; a TLS failure must never be re-flagged in that mode.
+    stubFetch(async () => {
+      throw Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("self-signed"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }),
+      });
+    });
+
+    // insecureTLS path does not call global fetch; point at a dead port so node:https refuses fast.
+    const probe = createProbe("https://127.0.0.1:9", { insecureTLS: true, defaultTimeoutMs: 500 });
+    const result = await probe("/health");
+
+    expect(result.status).toBe(0);
+    expect(result.tlsError).toBeUndefined();
+  });
 });

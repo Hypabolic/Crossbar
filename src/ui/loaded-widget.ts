@@ -114,7 +114,7 @@ export async function computeActiveEntry(
         confidence: 1,
       } as const;
 
-      const probe = createProbe(record.baseUrl, { auth: cred });
+      const probe = createProbe(record.baseUrl, { auth: cred, insecureTLS: record.insecureTLS });
 
       const state = await adapter.introspectLoaded(server, cred, probe);
       registry.updateHealthCache(record.id, { loaded: state.loadedModelIds });

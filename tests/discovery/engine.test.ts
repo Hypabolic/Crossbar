@@ -72,8 +72,66 @@ const okProbe: Probe = async (): Promise<ProbeResult> => ({
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe("DEFAULT_PROBE_PORTS", () => {
-  it("contains the seven canonical ports from CAPABILITY-MATRIX", () => {
-    expect(DEFAULT_PROBE_PORTS).toEqual([11434, 1234, 8080, 8000, 5000, 5001, 1337]);
+  it("contains the canonical backend ports plus the HTTPS ports", () => {
+    expect(DEFAULT_PROBE_PORTS).toEqual([11434, 1234, 8080, 8000, 5000, 5001, 1337, 443, 8443]);
+  });
+});
+
+describe("scheme selection", () => {
+  it("probes HTTPS ports over https:// and other ports over http://", async () => {
+    const probed = new Set<string>();
+    const adapter = makeAdapter("ollama", async (baseUrl) => {
+      probed.add(baseUrl);
+      return null;
+    });
+
+    await discoverLan([adapter], ["192.168.1.5"], { ports: [11434, 443, 8443] });
+
+    expect(probed.has("http://192.168.1.5:11434")).toBe(true);
+    expect(probed.has("https://192.168.1.5:443")).toBe(true);
+    expect(probed.has("https://192.168.1.5:8443")).toBe(true);
+  });
+});
+
+describe("untrusted TLS certificate", () => {
+  it("surfaces a found-but-untrusted placeholder when an HTTPS origin has a bad cert", async () => {
+    // No adapter matches (fingerprint returns null), but the bare liveness/tls probe
+    // reports a certificate error -> the origin must appear with tlsError set.
+    const adapter = makeAdapter("ollama", async () => null);
+    const tlsProbeFactory: ProbeFactory = () => async (): Promise<ProbeResult> => ({
+      status: 0,
+      ok: false,
+      headers: {},
+      error: "cert",
+      tlsError: true,
+    });
+
+    const results = await discoverLan([adapter], ["192.168.1.5"], {
+      ports: [443],
+      probeFactory: tlsProbeFactory,
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.baseUrl).toBe("https://192.168.1.5:443");
+    expect(results[0]?.tlsError).toBe(true);
+    expect(results[0]?.confidence).toBe(0);
+  });
+
+  it("does NOT surface a placeholder for an http origin that merely refused", async () => {
+    const adapter = makeAdapter("ollama", async () => null);
+    const refusedFactory: ProbeFactory = () => async (): Promise<ProbeResult> => ({
+      status: 0,
+      ok: false,
+      headers: {},
+      error: "ECONNREFUSED",
+    });
+
+    const results = await discoverLan([adapter], ["192.168.1.5"], {
+      ports: [8080],
+      probeFactory: refusedFactory,
+    });
+
+    expect(results).toHaveLength(0);
   });
 });
 

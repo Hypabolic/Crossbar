@@ -625,7 +625,7 @@ async function fetchModels(
 ): Promise<ModelDescriptor[] | null> {
   const adapter = adapterFor(record.kind);
   const cred = await registry.resolveCredential(record);
-  const probe = createProbe(record.baseUrl, { auth: cred, defaultTimeoutMs: 5000 });
+  const probe = createProbe(record.baseUrl, { auth: cred, defaultTimeoutMs: 5000, insecureTLS: record.insecureTLS });
   try {
     return await adapter.listModels(serverFromRecord(record), cred, probe);
   } catch (err) {
@@ -646,11 +646,12 @@ async function fetchModels(
 async function resolveAutoLoadsOnDemand(
   server: DiscoveredServer,
   cred: ServerCredential,
+  insecureTLS = false,
 ): Promise<boolean | undefined> {
   const adapter = adapterFor(server.kind);
   if (!canAutoLoadStatus(adapter)) return undefined;
   try {
-    const probe = createProbe(server.baseUrl, { auth: cred });
+    const probe = createProbe(server.baseUrl, { auth: cred, insecureTLS });
     return await adapter.autoLoadsOnDemand(server, cred, probe);
   } catch {
     return undefined;
@@ -681,7 +682,7 @@ async function performUseModel(
   // only fail on the first request.
   const adapter = adapterFor(record.kind);
   const cred = await registry.resolveCredential(record);
-  const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(serverFromRecord(record), cred);
+  const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(serverFromRecord(record), cred, record.insecureTLS ?? false);
   const disabledValues = manualLoadDisabledValues(selectableModels, autoLoadsOnDemand);
 
   // Nothing selectable at all — don't open a picker the user could only Esc out of.
@@ -735,7 +736,7 @@ async function performModelAction(
     ? `Switch model — ${record.label}`
     : `Load model — ${record.label}`;
   const cred = await registry.resolveCredential(record);
-  const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(serverFromRecord(record), cred);
+  const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(serverFromRecord(record), cred, record.insecureTLS ?? false);
   const disabledValues = manualLoadDisabledValues(selectableModels, autoLoadsOnDemand);
   const modelId = await selectOverlay(
     ctx,
@@ -750,7 +751,7 @@ async function performModelAction(
   if (!modelId) return;
 
   // Loads can be slow (cold model into VRAM) — give them a generous budget.
-  const probe = createProbe(record.baseUrl, { auth: cred, defaultTimeoutMs: 60_000 });
+  const probe = createProbe(record.baseUrl, { auth: cred, defaultTimeoutMs: 60_000, insecureTLS: record.insecureTLS });
 
   ctx.ui.notify(
     `Crossbar: ${action === "switch" ? "switching to" : "loading"} ${modelId}…`,
@@ -789,7 +790,7 @@ async function performUnload(
   const adapter = adapterFor(record.kind);
   if (!canLoadUnload(adapter)) return;
   const cred = await registry.resolveCredential(record);
-  const probe = createProbe(record.baseUrl, { auth: cred, defaultTimeoutMs: 5000 });
+  const probe = createProbe(record.baseUrl, { auth: cred, defaultTimeoutMs: 5000, insecureTLS: record.insecureTLS });
 
   let loadedIds: string[] = record.lastKnownLoaded ?? [];
   if (canIntrospect(adapter)) {
@@ -836,7 +837,7 @@ async function performIntrospect(
   const adapter = adapterFor(record.kind);
   if (!canIntrospect(adapter)) return;
   const cred = await registry.resolveCredential(record);
-  const probe = createProbe(record.baseUrl, { auth: cred, defaultTimeoutMs: 5000 });
+  const probe = createProbe(record.baseUrl, { auth: cred, defaultTimeoutMs: 5000, insecureTLS: record.insecureTLS });
 
   let state: LoadedState;
   try {
@@ -1393,19 +1394,82 @@ export async function openOnboarding(
     let manualApiKey: string | undefined;
     let selectedAuth: "none" | "apiKey" | undefined;
     let discoveredServer: DiscoveredServer | undefined;
+    // Per-add opt-in: accept an unverified TLS certificate for this server. Set only after
+    // the user explicitly confirms a self-signed cert; persisted on the ServerRecord.
+    let manualInsecureTLS = false;
 
     if (chosenBaseUrl === "__manual__") {
       const rawUrl = await ctx.ui.input(
         "Server URL",
-        "e.g. localhost:11434 or http://192.168.1.5:8080",
+        "e.g. localhost:11434, http://192.168.1.5:8080 or https://guru.fritz.box",
       );
       if (!rawUrl) continue;
 
+      const hadExplicitScheme =
+        rawUrl.trim().startsWith("http://") || rawUrl.trim().startsWith("https://");
       try {
         targetBaseUrl = normalizeManualUrl(rawUrl);
       } catch {
         ctx.ui.notify("Crossbar: invalid URL — could not parse.", "error");
         continue;
+      }
+
+      // Auto-upgrade to HTTPS when the user gave no scheme and the http:// origin is not a
+      // live backend. Bare input defaults to http:// (correct for local backends), but a
+      // reverse-proxied server like `guru.fritz.box` only answers on https:// — probing http
+      // there yields nothing or a redirect. Try https before giving up so the common
+      // "typed a bare hostname" case reaches the real endpoint. Explicit schemes are respected.
+      if (!hadExplicitScheme && targetBaseUrl.startsWith("http://")) {
+        const httpAlive = await (async () => {
+          try {
+            const p = createProbe(targetBaseUrl, { auth: { mode: "none" }, defaultTimeoutMs: 2000 });
+            const r = await p("/");
+            // A real backend answers 2xx/4xx directly; 0 = dead, 3xx = redirect (often to https).
+            return r.status !== 0 && !(r.status >= 300 && r.status < 400);
+          } catch {
+            return false;
+          }
+        })();
+        if (!httpAlive) {
+          const httpsCandidate = `https://${targetBaseUrl.slice("http://".length)}`;
+          const httpsReachable = await (async () => {
+            try {
+              const p = createProbe(httpsCandidate, {
+                auth: { mode: "none" },
+                defaultTimeoutMs: 2000,
+              });
+              const r = await p("/");
+              return r.status !== 0 || r.tlsError === true;
+            } catch {
+              return false;
+            }
+          })();
+          if (httpsReachable) targetBaseUrl = httpsCandidate;
+        }
+      }
+
+      // If the endpoint is HTTPS with an untrusted certificate, offer an explicit trust
+      // opt-in up front. A bare probe distinguishes "cert not trusted" (reachable) from
+      // "nothing listening" so the manual add doesn't dead-end on a silent TLS failure.
+      if (targetBaseUrl.startsWith("https://")) {
+        const tlsProbe = createProbe(targetBaseUrl, {
+          auth: { mode: "none" },
+          defaultTimeoutMs: 3000,
+        });
+        let tlsBlocked = false;
+        try {
+          tlsBlocked = (await tlsProbe("/")).tlsError === true;
+        } catch {
+          tlsBlocked = false;
+        }
+        if (tlsBlocked) {
+          const trust = await ctx.ui.select(
+            `The certificate for ${targetBaseUrl} could not be verified (self-signed or unknown issuer).`,
+            ["Do not add", "Trust this certificate and continue"],
+          );
+          if (trust !== "Trust this certificate and continue") continue;
+          manualInsecureTLS = true;
+        }
       }
 
       // Pre-probe unauthenticated, once, before asking the auth question. Some backends
@@ -1422,6 +1486,7 @@ export async function openOnboarding(
         const bareProbe = createProbe(targetBaseUrl, {
           auth: { mode: "none" },
           defaultTimeoutMs: 3000,
+          insecureTLS: manualInsecureTLS,
         });
         const { DISCOVERY_ADAPTERS } = await import("../adapters/index.ts");
         for (const adapter of DISCOVERY_ADAPTERS) {
@@ -1492,6 +1557,17 @@ export async function openOnboarding(
       }
       targetBaseUrl = chosenBaseUrl;
 
+      // A scanned HTTPS server flagged with an untrusted certificate requires an explicit
+      // trust opt-in before it can be added (the scan never trusts certs implicitly).
+      if (discoveredServer.tlsError) {
+        const trust = await ctx.ui.select(
+          `The certificate for ${targetBaseUrl} could not be verified (self-signed or unknown issuer).`,
+          ["Do not add", "Trust this certificate and continue"],
+        );
+        if (trust !== "Trust this certificate and continue") continue;
+        manualInsecureTLS = true;
+      }
+
       if (discoveredServer.auth === "apiKey") {
         const key = await ctx.ui.input("API key", "Required by this server");
         if (key === undefined) continue;
@@ -1509,7 +1585,11 @@ export async function openOnboarding(
       const cred = manualApiKey !== undefined
         ? { mode: "apiKey" as const, apiKey: manualApiKey }
         : { mode: "none" as const };
-      const probe = createProbe(targetBaseUrl, { auth: cred, defaultTimeoutMs: 3000 });
+      const probe = createProbe(targetBaseUrl, {
+        auth: cred,
+        defaultTimeoutMs: 3000,
+        insecureTLS: manualInsecureTLS,
+      });
 
       const { DISCOVERY_ADAPTERS } = await import("../adapters/index.ts");
       for (const adapter of DISCOVERY_ADAPTERS) {
@@ -1544,7 +1624,11 @@ export async function openOnboarding(
     const cred = manualApiKey !== undefined
       ? { mode: "apiKey" as const, apiKey: manualApiKey }
       : { mode: "none" as const };
-    const probe = createProbe(targetBaseUrl, { auth: cred, defaultTimeoutMs: 5000 });
+    const probe = createProbe(targetBaseUrl, {
+      auth: cred,
+      defaultTimeoutMs: 5000,
+      insecureTLS: manualInsecureTLS,
+    });
 
     let models: ModelDescriptor[] = [];
     try {
@@ -1589,7 +1673,11 @@ export async function openOnboarding(
     // Same ○ treatment as the manage flow. No dead-end guard here: Esc still
     // adds the server (just without a model pre-selected), so a fully disabled
     // list is a valid — if unhelpful — outcome.
-    const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(discoveredServer, cred);
+    const autoLoadsOnDemand = await resolveAutoLoadsOnDemand(
+      discoveredServer,
+      cred,
+      manualInsecureTLS,
+    );
     const disabledValues = manualLoadDisabledValues(selectableModels, autoLoadsOnDemand);
     const chosenModelId = await selectOverlay(
       ctx,
@@ -1612,6 +1700,7 @@ export async function openOnboarding(
       enabled: true,
       addedAt: Date.now(),
       lastKnownModels: models,
+      ...(manualInsecureTLS ? { insecureTLS: true } : {}),
     };
 
     // The key goes to Pi's authStorage, never crossbar.json.
