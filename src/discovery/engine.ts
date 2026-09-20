@@ -212,16 +212,17 @@ export async function probeOrigin(
   probeFactory?: ProbeFactory,
   insecureTLS = false,
 ): Promise<DiscoveredServer | null> {
-  const probe = probeFactory
-    ? probeFactory(origin, timeoutMs)
-    : createProbe(origin, { defaultTimeoutMs: timeoutMs, insecureTLS });
+  const makeProbe = (target: string, insecure: boolean): Probe =>
+    probeFactory
+      ? probeFactory(target, timeoutMs)
+      : createProbe(target, { defaultTimeoutMs: timeoutMs, insecureTLS: insecure });
 
-  // Run all adapter fingerprints concurrently for this single origin
-  const runFingerprints = async (p: Probe): Promise<DiscoveredServer | null> => {
+  // Run all adapter fingerprints concurrently for one target URL + probe.
+  const runFingerprints = async (target: string, p: Probe): Promise<DiscoveredServer | null> => {
     const results = await Promise.all(
       adapters.map(async (adapter): Promise<DiscoveredServer | null> => {
         try {
-          return await adapter.fingerprint(origin, p);
+          return await adapter.fingerprint(target, p);
         } catch {
           return null;
         }
@@ -230,28 +231,60 @@ export async function probeOrigin(
     return selectBest(results.filter((r): r is DiscoveredServer => r !== null));
   };
 
-  const best = await runFingerprints(probe);
+  const best = await runFingerprints(origin, makeProbe(origin, insecureTLS));
   if (best) return best;
+  if (insecureTLS || !origin.startsWith("https://")) return null;
 
-  // No adapter matched. On an HTTPS origin, a verified probe fails on ANY untrusted cert,
-  // so fingerprinting never had a fair chance to tell an LLM backend from an ordinary HTTPS
-  // device (router, NAS, printer, ...). Re-fingerprint that one origin through an insecure
-  // probe: only if a real adapter now identifies it as a backend do we surface it \u2014 tagged
-  // with tlsError so the user still gets the explicit trust prompt before it is added.
-  // If nothing matches even with TLS bypassed, it is not a backend and we drop it.
-  if (!insecureTLS && origin.startsWith("https://")) {
-    const liveness = await probe("/");
-    if (liveness.tlsError) {
-      const insecureProbe = probeFactory
-        ? probeFactory(origin, timeoutMs)
-        : createProbe(origin, { defaultTimeoutMs: timeoutMs, insecureTLS: true });
-      const insecureBest = await runFingerprints(insecureProbe);
-      if (insecureBest) {
-        return { ...insecureBest, tlsError: true };
-      }
+  // No adapter matched on an HTTPS origin. A verified probe fails on ANY untrusted cert or a
+  // handshake rejection, so fingerprinting never had a fair chance. Inspect why, then retry.
+  const liveness = await makeProbe(origin, false)("/");
+
+  // (a) Untrusted certificate (handshake OK): re-fingerprint the SAME origin insecurely. Only
+  //     surface it \u2014 tagged tlsError so the trust prompt fires \u2014 if a real adapter matches;
+  //     otherwise it is an ordinary HTTPS device (router, NAS, ...) and we drop it.
+  if (liveness.tlsError) {
+    const insecureBest = await runFingerprints(origin, makeProbe(origin, true));
+    if (insecureBest) return { ...insecureBest, baseUrl: origin, tlsError: true };
+    return null;
+  }
+
+  // (b) Handshake rejected (e.g. SNI-strict reverse proxy refusing a bare-IP connection):
+  //     reverse-resolve the IP to a hostname and retry there so the correct SNI is sent.
+  //     The reverse name need not be unique or correct \u2014 we simply try it; on failure we drop.
+  if (liveness.tlsHandshakeError) {
+    const hostnameUrl = await hostnameVariant(origin);
+    if (!hostnameUrl) return null; // reverse lookup gave nothing new to try
+
+    // Verified first (cert may be valid for the hostname), then insecure on a cert error.
+    const verifiedBest = await runFingerprints(hostnameUrl, makeProbe(hostnameUrl, false));
+    if (verifiedBest) return { ...verifiedBest, baseUrl: hostnameUrl };
+
+    const nameLiveness = await makeProbe(hostnameUrl, false)("/");
+    if (nameLiveness.tlsError) {
+      const insecureBest = await runFingerprints(hostnameUrl, makeProbe(hostnameUrl, true));
+      if (insecureBest) return { ...insecureBest, baseUrl: hostnameUrl, tlsError: true };
     }
   }
   return null;
+}
+
+/**
+ * Rewrite an HTTPS IP origin to use its reverse-DNS hostname, e.g.
+ * `https://192.168.188.102:443` \u2192 `https://guru.fritz.box:443`. Returns null when the host is
+ * not an IPv4 address or reverse resolution yields nothing different (nothing new to try).
+ */
+async function hostnameVariant(origin: string): Promise<string | null> {
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return null;
+  }
+  if (!isIpv4(parsed.hostname)) return null;
+  const resolved = await resolveHostname(parsed.hostname);
+  if (resolved === parsed.hostname) return null; // no PTR record / same value
+  parsed.hostname = resolved;
+  return parsed.toString().replace(/\/+$/, "");
 }
 
 // ────────────────────────────────────────────────────────────────────────────────
@@ -440,7 +473,9 @@ export async function discoverLan(
         const res = await probe("/");
         // status 0 = no TCP connection; a TLS-verify failure still means the host is UP,
         // so treat it as alive and let probeOrigin surface the untrusted-cert placeholder.
-        alive = res.status !== 0 || res.tlsError === true;
+        // A TLS cert error OR a handshake rejection both mean the host is UP; keep it alive so
+        // probeOrigin can attempt the insecure / reverse-DNS-hostname retries.
+        alive = res.status !== 0 || res.tlsError === true || res.tlsHandshakeError === true;
       } catch {
         alive = false;
       }

@@ -268,6 +268,25 @@ describe("createProbe", () => {
 
     expect(result.status).toBe(0);
     expect(result.tlsError).toBeUndefined();
+    expect(result.tlsHandshakeError).toBeUndefined();
+  });
+
+  it("flags tlsHandshakeError on an SNI/handshake rejection (not a cert-trust error)", async () => {
+    // A bare-IP connection to an SNI-strict reverse proxy aborts the TLS handshake.
+    stubFetch(async () => {
+      throw Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("tlsv1 alert internal error"), {
+          code: "ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR",
+        }),
+      });
+    });
+
+    const probe = createProbe("https://192.168.188.102");
+    const result = await probe("/");
+
+    expect(result.status).toBe(0);
+    expect(result.tlsHandshakeError).toBe(true);
+    expect(result.tlsError).toBeUndefined();
   });
 
   it("does NOT set tlsError when insecureTLS is enabled (verification is bypassed)", async () => {

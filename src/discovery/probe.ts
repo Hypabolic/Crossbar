@@ -49,15 +49,54 @@ const TLS_VERIFY_ERROR_CODES = new Set<string>([
   "CERT_UNTRUSTED",
 ]);
 
-/** Walk an error's `cause` chain looking for a recognised TLS verification error code. */
-function isTlsVerifyError(err: unknown): boolean {
+/**
+ * TLS/SSL failures that are NOT a certificate-trust problem but a handshake-level rejection:
+ * the server aborted the TLS negotiation, typically because it expects a specific SNI hostname
+ * and refuses a bare-IP connection (common with reverse proxies on a .fritz.box name).
+ *
+ * These mark the host as reachable-but-unspoken-to: TLS bypass alone can't fix them, but
+ * retrying with the reverse-DNS hostname (so the right SNI is sent) often can. Surfaced as
+ * {@link ProbeResult.tlsHandshakeError} so discovery can attempt a hostname retry.
+ */
+const TLS_HANDSHAKE_ERROR_CODES = new Set<string>([
+  "ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR",
+  "ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE",
+  "ERR_SSL_TLSV1_ALERT_UNRECOGNIZED_NAME",
+  "ERR_SSL_TLSV1_ALERT_ACCESS_DENIED",
+  "ERR_SSL_WRONG_VERSION_NUMBER",
+  "EPROTO",
+]);
+
+/** Walk an error's `cause` chain, returning the first `code` string found (up to 5 deep). */
+function findErrorCode(err: unknown): string | undefined {
   let cur: unknown = err;
   for (let depth = 0; cur != null && depth < 5; depth++) {
     const code = (cur as { code?: unknown }).code;
-    if (typeof code === "string" && TLS_VERIFY_ERROR_CODES.has(code)) return true;
+    if (typeof code === "string") {
+      if (TLS_VERIFY_ERROR_CODES.has(code) || TLS_HANDSHAKE_ERROR_CODES.has(code)) return code;
+    }
     cur = (cur as { cause?: unknown }).cause;
   }
-  return false;
+  // Fall back to any code found even if unrecognised (best-effort for message-based matches).
+  cur = err;
+  for (let depth = 0; cur != null && depth < 5; depth++) {
+    const code = (cur as { code?: unknown }).code;
+    if (typeof code === "string") return code;
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
+
+/** Walk an error's `cause` chain looking for a recognised TLS verification error code. */
+function isTlsVerifyError(err: unknown): boolean {
+  const code = findErrorCode(err);
+  return code !== undefined && TLS_VERIFY_ERROR_CODES.has(code);
+}
+
+/** Walk an error's `cause` chain looking for a TLS handshake-rejection error code. */
+function isTlsHandshakeError(err: unknown): boolean {
+  const code = findErrorCode(err);
+  return code !== undefined && TLS_HANDSHAKE_ERROR_CODES.has(code);
 }
 
 /**
@@ -235,6 +274,10 @@ export function createProbe(baseUrl: string, opts?: CreateProbeOptions): Probe {
       // Reachable-but-untrusted TLS is distinct from a dead address: flag it so the UI can
       // offer an explicit "trust this certificate" opt-in instead of "not reachable".
       const tlsError = !insecureTLS && isTlsVerifyError(err);
+      // A handshake-level rejection (e.g. the server demands a specific SNI hostname and aborts
+      // a bare-IP connection) means the host is up but won't talk to us at this address.
+      // Flag it so discovery can retry via the reverse-DNS hostname (correct SNI).
+      const tlsHandshakeError = isTlsHandshakeError(err);
 
       const result: ProbeResult = {
         status: 0,
@@ -244,6 +287,7 @@ export function createProbe(baseUrl: string, opts?: CreateProbeOptions): Probe {
         latencyMs,
       };
       if (tlsError) result.tlsError = true;
+      if (tlsHandshakeError) result.tlsHandshakeError = true;
       return result;
     } finally {
       clearTimeout(timerId);

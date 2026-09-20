@@ -108,14 +108,17 @@ describe("untrusted TLS certificate", () => {
         confidence: 0.95,
       };
     });
-    // First probe built for the origin = verified (cert error); the re-probe = insecure (200).
+    // Verified probes report a cert error; the insecure re-probe returns 200. We can't read the
+    // insecureTLS flag through ProbeFactory, so distinguish by call order WITHIN each probe: the
+    // insecure fingerprint pass is the only one whose adapter reads a 200. Simplest faithful
+    // model: any probe created AFTER the first two (verified fingerprint + liveness) is insecure.
     let built = 0;
     const factory: ProbeFactory = () => {
-      const isVerifiedPass = built++ === 0;
+      const isInsecurePass = built++ >= 2;
       return async (): Promise<ProbeResult> =>
-        isVerifiedPass
-          ? { status: 0, ok: false, headers: {}, error: "cert", tlsError: true }
-          : { status: 200, ok: true, headers: {}, text: "{}", json: {} };
+        isInsecurePass
+          ? { status: 200, ok: true, headers: {}, text: "{}", json: {} }
+          : { status: 0, ok: false, headers: {}, error: "cert", tlsError: true };
     };
 
     const results = await discoverLan([adapter], ["192.168.1.5"], {

@@ -46,6 +46,13 @@ export interface ProbeResult {
    * the host as dead. See {@link ServerRecord.insecureTLS}.
    */
   tlsError?: boolean;
+  /**
+   * True when the TLS handshake was rejected at the protocol level (not a cert-trust issue) \u2014
+   * typically an SNI-strict reverse proxy aborting a bare-IP connection. The host is up but
+   * unreachable at this address; discovery can retry using the reverse-DNS hostname so the
+   * correct SNI is sent. TLS bypass alone does not fix this.
+   */
+  tlsHandshakeError?: boolean;
 }
 
 /**
