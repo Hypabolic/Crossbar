@@ -34,7 +34,12 @@ interface PropsBody {
   } | null;
   build_info?: unknown;
   model_path?: string;
-  modalities?: string[];
+  /**
+   * Modalities of the loaded model. Current llama-server reports an object
+   * map with boolean values (e.g. `{ vision: true, video: true, audio: false }`);
+   * legacy string-array payloads (`["text","image"]`) are tolerated as well.
+   */
+  modalities?: string[] | Record<string, unknown>;
 }
 
 interface V1ModelsBody {
@@ -99,6 +104,28 @@ function positiveIntegerArg(
     if (value !== undefined) found = value;
   }
   return found;
+}
+
+/**
+ * Detect vision capability from `/props` modalities. Current llama-server
+ * reports an object map keyed by modality with boolean values
+ * (e.g. `{ vision: true, video: true, audio: false }`); legacy payloads may
+ * use a string array (`["text","image"]`). Both shapes are accepted.
+ */
+function hasVisionModality(modalities: PropsBody["modalities"]): boolean {
+  if (!modalities) return false;
+  if (Array.isArray(modalities)) {
+    return modalities.some(
+      (m) =>
+        typeof m === "string" &&
+        (m.toLowerCase().includes("vision") || m.toLowerCase().includes("image")),
+    );
+  }
+  return Object.keys(modalities).some(
+    (key) =>
+      (key.toLowerCase().includes("vision") || key.toLowerCase().includes("image")) &&
+      Boolean(modalities[key]),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -185,8 +212,7 @@ class LlamacppAdapter implements BackendAdapter {
       propsParams?.max_tokens,
       props?.default_generation_settings?.n_predict,
     );
-    const hasVision = Array.isArray(props?.modalities) &&
-      props.modalities.some((m) => m.toLowerCase().includes("vision") || m.toLowerCase().includes("image"));
+    const hasVision = hasVisionModality(props?.modalities);
 
     return data.map((entry) => {
       const isRouterRow = entry.status != null;
