@@ -148,7 +148,7 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
     const cred = await reg.resolveCredential(record);
     let models: ModelDescriptor[] = record.lastKnownModels ?? [];
     try {
-      const probe = createProbe(record.baseUrl, { auth: cred });
+      const probe = createProbe(record.baseUrl, { auth: cred, insecureTLS: record.insecureTLS });
       const liveModels = await adapter.listModels(recordToServer(record), cred, probe);
       // Persist only when the catalogue changed in a registration-relevant way.
       if (catalogueChanged(record.lastKnownModels, liveModels)) {

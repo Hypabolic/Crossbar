@@ -118,7 +118,21 @@ export const DEFAULT_PROBE_PORTS: readonly number[] = [
   5000,  // TabbyAPI / oobabooga
   5001,  // KoboldCpp
   1337,  // Jan
+  443,   // HTTPS (reverse-proxied backends, e.g. llama-server behind nginx)
+  8443,  // HTTPS-alt
 ];
+
+/**
+ * Ports that are conventionally HTTPS. An origin on one of these is probed with an `https:`
+ * scheme; every other port is probed as `http:`. This lets a subnet sweep reach reverse-proxied
+ * backends served over TLS without doubling the socket count by trying both schemes everywhere.
+ */
+export const HTTPS_PORTS: ReadonlySet<number> = new Set([443, 8443]);
+
+/** Pick the probe scheme for a port: HTTPS for well-known TLS ports, HTTP otherwise. */
+function schemeForPort(port: number): "http:" | "https:" {
+  return HTTPS_PORTS.has(port) ? "https:" : "http:";
+}
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_TIMEOUT_MS = 600;
@@ -196,24 +210,81 @@ export async function probeOrigin(
   adapters: BackendAdapter[],
   timeoutMs: number,
   probeFactory?: ProbeFactory,
+  insecureTLS = false,
 ): Promise<DiscoveredServer | null> {
-  const probe = probeFactory
-    ? probeFactory(origin, timeoutMs)
-    : createProbe(origin, { defaultTimeoutMs: timeoutMs });
+  const makeProbe = (target: string, insecure: boolean): Probe =>
+    probeFactory
+      ? probeFactory(target, timeoutMs)
+      : createProbe(target, { defaultTimeoutMs: timeoutMs, insecureTLS: insecure });
 
-  // Run all adapter fingerprints concurrently for this single origin
-  const fingerprintResults = await Promise.all(
-    adapters.map(async (adapter): Promise<DiscoveredServer | null> => {
-      try {
-        return await adapter.fingerprint(origin, probe);
-      } catch {
-        return null;
-      }
-    }),
-  );
+  // Run all adapter fingerprints concurrently for one target URL + probe.
+  const runFingerprints = async (target: string, p: Probe): Promise<DiscoveredServer | null> => {
+    const results = await Promise.all(
+      adapters.map(async (adapter): Promise<DiscoveredServer | null> => {
+        try {
+          return await adapter.fingerprint(target, p);
+        } catch {
+          return null;
+        }
+      }),
+    );
+    return selectBest(results.filter((r): r is DiscoveredServer => r !== null));
+  };
 
-  const candidates = fingerprintResults.filter((r): r is DiscoveredServer => r !== null);
-  return selectBest(candidates);
+  const best = await runFingerprints(origin, makeProbe(origin, insecureTLS));
+  if (best) return best;
+  if (insecureTLS || !origin.startsWith("https://")) return null;
+
+  // No adapter matched on an HTTPS origin. A verified probe fails on ANY untrusted cert or a
+  // handshake rejection, so fingerprinting never had a fair chance. Inspect why, then retry.
+  const liveness = await makeProbe(origin, false)("/");
+
+  // (a) Untrusted certificate (handshake OK): re-fingerprint the SAME origin insecurely. Only
+  //     surface it \u2014 tagged tlsError so the trust prompt fires \u2014 if a real adapter matches;
+  //     otherwise it is an ordinary HTTPS device (router, NAS, ...) and we drop it.
+  if (liveness.tlsError) {
+    const insecureBest = await runFingerprints(origin, makeProbe(origin, true));
+    if (insecureBest) return { ...insecureBest, baseUrl: origin, tlsError: true };
+    return null;
+  }
+
+  // (b) Handshake rejected (e.g. SNI-strict reverse proxy refusing a bare-IP connection):
+  //     reverse-resolve the IP to a hostname and retry there so the correct SNI is sent.
+  //     The reverse name need not be unique or correct \u2014 we simply try it; on failure we drop.
+  if (liveness.tlsHandshakeError) {
+    const hostnameUrl = await hostnameVariant(origin);
+    if (!hostnameUrl) return null; // reverse lookup gave nothing new to try
+
+    // Verified first (cert may be valid for the hostname), then insecure on a cert error.
+    const verifiedBest = await runFingerprints(hostnameUrl, makeProbe(hostnameUrl, false));
+    if (verifiedBest) return { ...verifiedBest, baseUrl: hostnameUrl };
+
+    const nameLiveness = await makeProbe(hostnameUrl, false)("/");
+    if (nameLiveness.tlsError) {
+      const insecureBest = await runFingerprints(hostnameUrl, makeProbe(hostnameUrl, true));
+      if (insecureBest) return { ...insecureBest, baseUrl: hostnameUrl, tlsError: true };
+    }
+  }
+  return null;
+}
+
+/**
+ * Rewrite an HTTPS IP origin to use its reverse-DNS hostname, e.g.
+ * `https://192.168.188.102:443` \u2192 `https://guru.fritz.box:443`. Returns null when the host is
+ * not an IPv4 address or reverse resolution yields nothing different (nothing new to try).
+ */
+async function hostnameVariant(origin: string): Promise<string | null> {
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return null;
+  }
+  if (!isIpv4(parsed.hostname)) return null;
+  const resolved = await resolveHostname(parsed.hostname);
+  if (resolved === parsed.hostname) return null; // no PTR record / same value
+  parsed.hostname = resolved;
+  return parsed.toString().replace(/\/+$/, "");
 }
 
 // ────────────────────────────────────────────────────────────────────────────────
@@ -237,6 +308,12 @@ export interface DiscoverLocalhostOptions {
   progress?: ProgressCallback;
   /** Override how the per-origin Probe is built (tests inject a fake probe here). */
   probeFactory?: ProbeFactory;
+  /**
+   * Accept unverified TLS certificates when probing HTTPS origins (self-signed / unknown CA).
+   * Opt-in only \u2014 default false. When false, an HTTPS origin with an untrusted cert is
+   * reported via {@link DiscoveredServer.tlsError} rather than silently dropped.
+   */
+  insecureTLS?: boolean;
 }
 
 /**
@@ -261,7 +338,8 @@ export async function discoverLocalhost(
   const localAdapters = adapters.filter((a) => !CLOUD_KINDS.has(a.kind));
   if (localAdapters.length === 0) return [];
 
-  const origins = ports.map((port) => normalizeOrigin("http:", host, port));
+  const insecureTLS = opts?.insecureTLS ?? false;
+  const origins = ports.map((port) => normalizeOrigin(schemeForPort(port), host, port));
 
   // Build per-origin tasks for bounded concurrency
   let completed = 0;
@@ -270,7 +348,13 @@ export async function discoverLocalhost(
   const progress = opts?.progress;
   const tasks = origins.map((origin) => async (): Promise<DiscoveredServer | null> => {
     if (signal?.aborted) return null;
-    const result = await probeOrigin(origin, localAdapters, timeoutMs, opts?.probeFactory);
+    const result = await probeOrigin(
+      origin,
+      localAdapters,
+      timeoutMs,
+      opts?.probeFactory,
+      insecureTLS,
+    );
     if (result !== null) serversFound++;
     completed++;
     progress?.(completed, total, serversFound);
@@ -329,6 +413,12 @@ export interface DiscoverLanOptions {
   progress?: ProgressCallback;
   /** Override how the per-origin Probe is built (tests inject a fake probe here). */
   probeFactory?: ProbeFactory;
+  /**
+   * Accept unverified TLS certificates when probing HTTPS origins (self-signed / unknown CA).
+   * Opt-in only — default false. When false, an HTTPS origin with an untrusted cert is
+   * reported via {@link DiscoveredServer.tlsError} rather than silently dropped.
+   */
+  insecureTLS?: boolean;
 }
 
 /**
@@ -351,16 +441,17 @@ export async function discoverLan(
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const concurrency = opts?.concurrency ?? DEFAULT_CONCURRENCY;
   const livenessFirst = opts?.livenessFirst ?? false;
+  const insecureTLS = opts?.insecureTLS ?? false;
   const signal = opts?.signal;
 
   const localAdapters = adapters.filter((a) => !CLOUD_KINDS.has(a.kind));
   if (localAdapters.length === 0) return [];
 
-  // Enumerate host × port origins
+  // Enumerate host × port origins (HTTPS scheme for well-known TLS ports).
   const origins: string[] = [];
   for (const host of hosts) {
     for (const port of ports) {
-      origins.push(normalizeOrigin("http:", host, port));
+      origins.push(normalizeOrigin(schemeForPort(port), host, port));
     }
   }
 
@@ -376,10 +467,15 @@ export async function discoverLan(
     if (livenessFirst) {
       const probe = opts?.probeFactory
         ? opts.probeFactory(origin, timeoutMs)
-        : createProbe(origin, { defaultTimeoutMs: timeoutMs });
+        : createProbe(origin, { defaultTimeoutMs: timeoutMs, insecureTLS });
       let alive = false;
       try {
-        alive = (await probe("/")).status !== 0; // status 0 = no TCP connection
+        const res = await probe("/");
+        // status 0 = no TCP connection; a TLS-verify failure still means the host is UP,
+        // so treat it as alive and let probeOrigin surface the untrusted-cert placeholder.
+        // A TLS cert error OR a handshake rejection both mean the host is UP; keep it alive so
+        // probeOrigin can attempt the insecure / reverse-DNS-hostname retries.
+        alive = res.status !== 0 || res.tlsError === true || res.tlsHandshakeError === true;
       } catch {
         alive = false;
       }
@@ -389,7 +485,13 @@ export async function discoverLan(
         return null;
       }
     }
-    const result = await probeOrigin(origin, localAdapters, timeoutMs, opts?.probeFactory);
+    const result = await probeOrigin(
+      origin,
+      localAdapters,
+      timeoutMs,
+      opts?.probeFactory,
+      insecureTLS,
+    );
     if (result !== null) lanServersFound++;
     lanCompleted++;
     lanProgress?.(lanCompleted, total, lanServersFound);

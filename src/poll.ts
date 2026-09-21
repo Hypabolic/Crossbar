@@ -89,7 +89,7 @@ export async function pollServer(
 ): Promise<HealthState> {
   const adapter = adapterFor(record.kind);
   const cred = await registry.resolveCredential(record);
-  const probe = createProbe(record.baseUrl, { auth: cred });
+  const probe = createProbe(record.baseUrl, { auth: cred, insecureTLS: record.insecureTLS });
   const server = serverOf(record);
   const hasHealth = supports(adapter, Capability.Health) && typeof adapter.health === "function";
 
