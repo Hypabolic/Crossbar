@@ -104,11 +104,42 @@ port to make it fast.
   programmatically until an interactive `/crossbar` add or discovery persists its models (inherent
   cold-start limitation).
 
+## HTTPS backends & self-signed certificates
+
+Crossbar discovers backends served over HTTPS (it probes the standard TLS ports and, when a
+server rejects a bare-IP connection because it demands a specific SNI hostname, retries via the
+reverse-DNS name). If the certificate is self-signed or issued by a private CA, Crossbar asks
+whether to trust it and remembers the choice per server.
+
+> [!IMPORTANT]
+> That trust setting covers **Crossbar's own requests only** — discovery, model listing and
+> health checks. The actual inference requests are sent by **Pi**, which verifies TLS itself and
+> offers no per-provider certificate option. With an untrusted certificate the model is listed
+> and selectable, but every request fails with `Connection error`.
+
+The fix is to make your CA known to Node, which is what Pi uses:
+
+```bash
+# Export your CA (macOS example; adjust for your CA / platform)
+security find-certificate -a -c "My Home CA" -p /Library/Keychains/System.keychain \
+  > ~/.pi/certs/my-ca.pem
+
+# Make Pi trust it, then restart Pi
+export NODE_EXTRA_CA_CERTS="$HOME/.pi/certs/my-ca.pem"
+```
+
+Note that the **root** CA must be in that file — exporting only an intermediate is not enough.
+With the CA trusted, the connection is properly verified and no "trust this certificate" opt-in
+is needed at all.
+
 ## Security
 
 - API keys are **never** written to `crossbar.json`, never logged, and never inlined into a provider
   config — Pi resolves them from `auth.json` at request time.
 - Discovery is localhost-only by default.
+- TLS verification is **never** bypassed implicitly: a subnet scan never trusts a certificate on
+  its own, and skipping verification is an explicit, per-server opt-in that only ever applies to
+  Crossbar's own probes.
 - Crossbar adds no telemetry.
 
 ## Development

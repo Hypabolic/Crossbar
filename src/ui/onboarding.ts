@@ -1718,5 +1718,19 @@ export async function openOnboarding(
       `Crossbar: ${discoveredServer.label} added and registered (${selectableModels.length} models).${modelNote}`,
       "info",
     );
+
+    // Crossbar's TLS opt-in only covers ITS OWN probes (discovery, model listing, health).
+    // The actual inference requests are issued by Pi, whose provider config has no TLS
+    // option — so an untrusted certificate still fails there with a bare "Connection error".
+    // Say so explicitly instead of letting the user hit that dead end after a successful add.
+    if (manualInsecureTLS) {
+      ctx.ui.notify(
+        `Crossbar: ${discoveredServer.label} uses an untrusted certificate. Crossbar accepts it, ` +
+          `but Pi verifies TLS itself when sending requests and will fail with "Connection error". ` +
+          `Fix: point NODE_EXTRA_CA_CERTS at your CA certificate and restart Pi ` +
+          `(e.g. export NODE_EXTRA_CA_CERTS="$HOME/.pi/certs/my-ca.pem").`,
+        "warning",
+      );
+    }
   }
 }
