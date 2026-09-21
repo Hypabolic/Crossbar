@@ -8,7 +8,7 @@ adapter registers under (`oai` = `openai-completions`, `ant` = `anthropic-messag
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | **Ollama** | 11434 | oai | ✅ `/api/tags`,`/v1/models` | ✅ `/api/ps` | ✅ implicit (request id) | ✅ `keep_alive:0` | ❌ (always on) | ◐ none local | ✅ `GET /` text | ✅ `/api/show` caps + ctx | ✅ | `GET /` → `Ollama is running` |
 | **LM Studio** | 1234 | oai | ✅ `/api/v1/models` (v0 fallback) | ✅ `state` field | ✅ JIT + `/api/v1/models/load` | ✅ load/unload + `lms` | ❌ (always on) | ◐ Bearer, none default | ◐ infer 200 | ✅ type+`max_context_length` | ✅ | `/api/v1/models` (v0 fallback) w/ `state`,`compatibility_type` |
-| **llama-server** | 8080 | oai | ✅ `/v1/models` | ◐ `/props`,`/slots` (single) | ❌ (1/instance) | ❌ classic | ❌ (always on) | ◐ none / `--api-key` | ✅ `/health` | ◐ ctx via `meta.n_ctx`, router args, `/props` | ✅ | `/props` w/ `default_generation_settings`+`build_info` |
+| **llama-server** | 8080 | oai | ✅ `/v1/models` | ◐ `/props`,`/slots` (single) | ❌ (1/instance) | ❌ classic | ❌ (always on) | ◐ none / `--api-key` | ✅ `/health` | ◐ ctx via `meta.n_ctx`, router args, `/props`; vision via `/props` `modalities` | ✅ | `/props` w/ `default_generation_settings`+`build_info` |
 | **llama-swap** | 8080 | oai/ant | ✅ `/v1/models` (all config) | ✅ `/running` | ✅ via `model` → restart upstream | ✅ `/api/models/unload`, ttl | ❌ (always on) | ◐ optional multi-scheme | ✅ `/health`→OK | ◐ ctx via `context_length`; output unknown | ✅ | `/` → `/ui/`; `/running`,`/upstream/{model}` |
 | **vLLM** | 8000 | oai | ✅ `/v1/models` | ◐ `/is_sleeping` (dev) | ❌ base · ◐ LoRA | ◐ sleep/wake + LoRA | ❌ | ◐ none / `--api-key` | ✅ `/health` | ◐ `max_model_len` only | ✅ | `/version` + `/metrics` `vllm:` + `owned_by:"vllm"` |
 | **OpenAI** | cloud | oai | ✅ `/v1/models` | ❌ | ✅ (pick id) | ❌ managed | ❌ | ✅ Bearer | ❌ (status page) | ❌ (static table needed) | ✅ | n/a (configured, not probed) |
@@ -18,7 +18,7 @@ adapter registers under (`oai` = `openai-completions`, `ant` = `anthropic-messag
 | **oobabooga** | 5000 | oai | ✅ `/v1/models` | ✅ `/v1/internal/model/info` | ✅ load | ✅ `/v1/internal/model/{load,unload}` | ❌ | ◐ `--api-key` | ◐ | ◐ | ✅ | `/v1/internal/*` namespace |
 | **Jan** | 1337 | oai | ✅ `/v1/models` | ◐ | ◐ engine | ◐ engine | ❌ | ◐ Bearer | ❌ | ◐ | ✅ | weak (log line) |
 | **llamafile** | 8080 | oai | ✅ `/v1/models` | ◐ `/props` | ❌ | ❌ | ❌ (always on) | ◐ `--api-key` | ✅ `/health` | ◐ via `/props` | ✅ | `/props` w/ non-`bNNNN` build_info |
-| **Unsloth Studio** | 8888 | oai | ✅ `/v1/models` (keyed) | ✅ per-model `loaded` field | ❌ (UI-only) | ❌ (UI-only) | ✅ `/api/settings/openai-auto-switch` | ✅ Bearer `sk-unsloth-…` (required) | ❌ (poll via listModels) | ◐ ctx fields only while loaded | ✅ | `Server: unsloth-studio` header (every response) |
+| **Unsloth Studio** | 8888 | oai | ✅ `/v1/models` (keyed) | ✅ per-model `loaded` field | ❌ (UI-only) | ❌ (UI-only) | ✅ `/api/settings/openai-auto-switch` | ✅ Bearer `sk-unsloth-…` (required) | ❌ (poll via listModels) | ◐ ctx fields only while loaded; vision + reasoning for the active model via `/api/inference/status` (#35, #37) — both best-effort | ✅ | `Server: unsloth-studio` header (every response) |
 | **generic OpenAI-compat** | varies | oai | ✅ `/v1/models` | ❌ | ❌ | ❌ | ❌ | ◐ optional Bearer | ◐ | ◐ | ✅ | anything serving `/v1/models` (fallback) |
 
 ## Capability-driven UX rules (derived)
