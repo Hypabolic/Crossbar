@@ -52,6 +52,15 @@ interface V1ModelsBody {
     status?: {
       args?: string[] | null;
     } | null;
+    /**
+     * Router-mode only: the router reports each model's own modalities here,
+     * derived from GGUF metadata plus mmproj availability (so a multimodal
+     * model without its mmproj still reports text-only). Single-model
+     * servers and older routers carry no such field.
+     */
+    architecture?: {
+      input_modalities?: string[] | Record<string, unknown> | null;
+    } | null;
   }>;
 }
 
@@ -107,10 +116,12 @@ function positiveIntegerArg(
 }
 
 /**
- * Detect vision capability from `/props` modalities. Current llama-server
- * reports an object map keyed by modality with boolean values
- * (e.g. `{ vision: true, video: true, audio: false }`); legacy payloads may
- * use a string array (`["text","image"]`). Both shapes are accepted.
+ * Detect vision capability from a llama.cpp modalities payload — the root
+ * `/props` `modalities` or a router row's `architecture.input_modalities`.
+ * Current llama-server reports an object map keyed by modality with boolean
+ * values (e.g. `{ vision: true, video: true, audio: false }`); legacy
+ * payloads may use a string array (`["text","image"]`). Both shapes are
+ * accepted.
  */
 function hasVisionModality(modalities: PropsBody["modalities"]): boolean {
   if (!modalities) return false;
@@ -212,10 +223,15 @@ class LlamacppAdapter implements BackendAdapter {
       propsParams?.max_tokens,
       props?.default_generation_settings?.n_predict,
     );
+    // Root /props modalities describe the loaded model on a single-model
+    // server; in router mode the root endpoint carries none, so each row's
+    // own architecture.input_modalities wins whenever present.
     const hasVision = hasVisionModality(props?.modalities);
 
     return data.map((entry) => {
       const isRouterRow = entry.status != null;
+      const rowModalities = entry.architecture?.input_modalities;
+      const vision = rowModalities ? hasVisionModality(rowModalities) : hasVision;
       const contextWindow = firstPositiveSafeInteger(
         entry.meta?.n_ctx,
         isRouterRow ? undefined : propsNCtx,
@@ -229,7 +245,7 @@ class LlamacppAdapter implements BackendAdapter {
       const descriptor: ModelDescriptor = {
         id: entry.id,
         name: entry.id,
-        input: hasVision ? ["text", "image"] : ["text"],
+        input: vision ? ["text", "image"] : ["text"],
         reasoning: false,
       };
       if (contextWindow !== undefined) descriptor.contextWindow = contextWindow;

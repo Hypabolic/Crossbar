@@ -317,6 +317,56 @@ describe("llama.cpp vision detection (/props modalities)", () => {
   });
 });
 
+describe("llama.cpp vision detection (router rows)", () => {
+  it.each([
+    {
+      name: "row with image modalities wins over text-only root props",
+      row: { id: "vlm", architecture: { input_modalities: ["text", "image"] } },
+      props: { modalities: { vision: false } },
+      expected: ["text", "image"],
+    },
+    {
+      name: "row with image and video modalities registers image input",
+      row: { id: "vlm-video", architecture: { input_modalities: ["text", "image", "video"] } },
+      props: { modalities: null },
+      expected: ["text", "image"],
+    },
+    {
+      name: "explicit text-only row is not rescued by vision root props",
+      row: { id: "text-row", architecture: { input_modalities: ["text"] } },
+      props: { modalities: { vision: true } },
+      expected: ["text"],
+    },
+    {
+      name: "row without architecture falls back to the root props object map",
+      row: { id: "fallback-map", architecture: null },
+      props: { modalities: { vision: true } },
+      expected: ["text", "image"],
+    },
+    {
+      name: "row without architecture falls back to the legacy root props array",
+      row: { id: "fallback-legacy" },
+      props: { modalities: ["text", "image"] },
+      expected: ["text", "image"],
+    },
+    {
+      name: "row object-map modalities with vision enabled",
+      row: { id: "map-row", architecture: { input_modalities: { vision: true, audio: false } } },
+      props: { modalities: null },
+      expected: ["text", "image"],
+    },
+    {
+      name: "null root props with no row modalities stays text-only",
+      row: { id: "bare" },
+      props: { modalities: null },
+      expected: ["text"],
+    },
+  ])("$name", async ({ row, props, expected }) => {
+    const [model] = await listModels([row], props);
+    expect(model?.input).toEqual(expected);
+  });
+});
+
 describe("llama.cpp Pi model limits", () => {
   it("uses the Pi-boundary sentinels for absent or non-positive descriptor limits", () => {
     const absent = llamacppAdapter.toPiModel(SERVER, {
