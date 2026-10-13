@@ -271,6 +271,102 @@ describe("llama.cpp reported model limits", () => {
   });
 });
 
+describe("llama.cpp vision detection (/props modalities)", () => {
+  it.each([
+    {
+      name: "object map with vision enabled (live llama-server shape)",
+      props: { modalities: { vision: true, video: true, audio: false } },
+      expected: ["text", "image"],
+    },
+    {
+      name: "object map with vision disabled",
+      props: { modalities: { vision: false, video: false, audio: false } },
+      expected: ["text"],
+    },
+    {
+      name: "object map using an image key",
+      props: { modalities: { image: true } },
+      expected: ["text", "image"],
+    },
+    {
+      name: "legacy string array with an image entry",
+      props: { modalities: ["text", "image"] },
+      expected: ["text", "image"],
+    },
+    {
+      name: "legacy string array with a vision entry",
+      props: { modalities: ["text", "vision"] },
+      expected: ["text", "image"],
+    },
+    {
+      name: "text-only string array",
+      props: { modalities: ["text"] },
+      expected: ["text"],
+    },
+    {
+      name: "missing modalities field",
+      props: {},
+      expected: ["text"],
+    },
+  ])("$name", async ({ props, expected }) => {
+    const [model] = await listModels(
+      [{ id: "vision-check", meta: null, status: null }],
+      props,
+    );
+    expect(model?.input).toEqual(expected);
+  });
+});
+
+describe("llama.cpp vision detection (router rows)", () => {
+  it.each([
+    {
+      name: "row with image modalities wins over text-only root props",
+      row: { id: "vlm", architecture: { input_modalities: ["text", "image"] } },
+      props: { modalities: { vision: false } },
+      expected: ["text", "image"],
+    },
+    {
+      name: "row with image and video modalities registers image input",
+      row: { id: "vlm-video", architecture: { input_modalities: ["text", "image", "video"] } },
+      props: { modalities: null },
+      expected: ["text", "image"],
+    },
+    {
+      name: "explicit text-only row is not rescued by vision root props",
+      row: { id: "text-row", architecture: { input_modalities: ["text"] } },
+      props: { modalities: { vision: true } },
+      expected: ["text"],
+    },
+    {
+      name: "row without architecture falls back to the root props object map",
+      row: { id: "fallback-map", architecture: null },
+      props: { modalities: { vision: true } },
+      expected: ["text", "image"],
+    },
+    {
+      name: "row without architecture falls back to the legacy root props array",
+      row: { id: "fallback-legacy" },
+      props: { modalities: ["text", "image"] },
+      expected: ["text", "image"],
+    },
+    {
+      name: "row object-map modalities with vision enabled",
+      row: { id: "map-row", architecture: { input_modalities: { vision: true, audio: false } } },
+      props: { modalities: null },
+      expected: ["text", "image"],
+    },
+    {
+      name: "null root props with no row modalities stays text-only",
+      row: { id: "bare" },
+      props: { modalities: null },
+      expected: ["text"],
+    },
+  ])("$name", async ({ row, props, expected }) => {
+    const [model] = await listModels([row], props);
+    expect(model?.input).toEqual(expected);
+  });
+});
+
 describe("llama.cpp Pi model limits", () => {
   it("uses the Pi-boundary sentinels for absent or non-positive descriptor limits", () => {
     const absent = llamacppAdapter.toPiModel(SERVER, {

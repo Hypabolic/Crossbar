@@ -40,7 +40,8 @@ const PROPS_RESPONSE: ProbeResult = {
       compiler: "gcc-13",
     },
     model_path: MODEL_PATH,
-    modalities: ["text"],
+    // Current llama-server shape: object map of the loaded model's modalities.
+    modalities: { vision: false },
   },
 };
 

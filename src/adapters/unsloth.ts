@@ -40,6 +40,41 @@
  * `owned_by: "unsloth-studio"` and a `loaded: boolean` residency flag, used below for
  * IntrospectLoaded.
  *
+ * # Vision detection (issue #35)
+ *
+ * The OpenAI-compatible `GET /v1/models` exposes NO modality information — entries carry only
+ * `id`, `owned_by`, `quant`, context-length fields and `loaded`. Registering every model as
+ * text-only (the old behaviour) made Pi silently replace attached images with the placeholder
+ * `(image omitted: model does not support images)`, so VLMs appeared to "have no vision".
+ *
+ * Vision is read from the SAME loaded-backend status call used for thinking:
+ * `GET /api/inference/status` reports `is_vision: boolean` for the resident model (verified
+ * against a live instance: `is_vision: true` for a loaded Qwen3-VL). This is local and instant
+ * — it never touches huggingface.co.
+ *
+ * We deliberately do NOT use `GET /api/models/check-vision/{model_name}`: for a model whose id
+ * is not a resolvable HF repo (e.g. a local GGUF quant name like `Qwen3.8-27B-IQ4_NL`) Studio's
+ * handler falls back to fetching `config.json` from huggingface.co and 401s in a retry loop on
+ * EVERY `listModels`. Since Unsloth has no health endpoint Crossbar polls via `listModels`
+ * every 15s → sustained HF noise/latency even for the loaded model. The status endpoint has no
+ * such fallback.
+ *
+ * Vision is therefore known ONLY for the loaded model (its `active_model`). Unloaded models
+ * stay text-only until they are loaded, when the next `listModels` picks up their real
+ * modality. Best-effort: ANY failure (older Studio → 404, refused, malformed body) degrades
+ * to text-only, the conservative pre-fix behaviour. Never throws, never blocks registration.
+ *
+ * # Thinking detection (issue #37)
+ *
+ * The model catalogue (`/v1/models`, `/api/models/*`) carries no thinking metadata at all.
+ * Studio knows it only for the LOADED backend: `GET /api/inference/status` reports
+ * `supports_reasoning`, `reasoning_style`, `reasoning_effort_levels` — plus `active_model`,
+ * which carries the same public id as the `/v1/models` entry, so the flag can be matched to
+ * exactly one model (verified against a live instance: `supports_reasoning: true` for a Qwen3
+ * `enable_thinking` template). Unloaded models have no clean detection path and stay
+ * `reasoning: false`. Same best-effort contract as vision: any probe failure degrades to the
+ * conservative pre-fix behaviour and never throws.
+ *
  * Uses ONLY the injected Probe — never calls fetch directly.
  */
 
@@ -85,6 +120,18 @@ interface UnslothAutoSwitchSettings {
   enabled?: unknown;
 }
 
+/**
+ * Shape of `GET /api/inference/status` — the loaded-backend status surface. Only the fields
+ * needed for vision and thinking detection are declared; everything else is ignored.
+ */
+interface UnslothInferenceStatus {
+  /** Public id of the loaded model — same namespace as `/v1/models` entries. */
+  active_model?: string;
+  /** Whether the loaded model accepts image input. Trusted only when strictly `true`. */
+  is_vision?: boolean;
+  supports_reasoning?: boolean;
+}
+
 /** The literal header value Unsloth Studio sets on every response. */
 const SERVER_HEADER_VALUE = "unsloth-studio";
 
@@ -110,6 +157,9 @@ const AUTO_SWITCH_SETTINGS_PATH = "/api/settings/openai-auto-switch";
  */
 const FALLBACK_CONTEXT_WINDOW = 128_000;
 const FALLBACK_MAX_TOKENS = 0;
+
+/** Loaded-backend status endpoint (thinking metadata; see the file header, issue #37). */
+const INFERENCE_STATUS_PATH = "/api/inference/status";
 
 function isUnslothStudioResponse(headers: Record<string, string>): boolean {
   // Probe lowercases header names AND we compare the value case-insensitively — cheap
@@ -149,6 +199,41 @@ function contextWindowFor(entry: UnslothModelEntry): number | undefined {
     positiveSafeInteger(entry.max_context_length) ??
     positiveSafeInteger(entry.native_context_length)
   );
+}
+
+/**
+ * Read Studio's loaded-backend status: which model is resident (`active_model`), whether it
+ * accepts image input (`is_vision`), and whether it supports thinking (`supports_reasoning`).
+ *
+ * The status endpoint describes the loaded backend only: `active_model` carries the same public
+ * id as the `/v1/models` entry (verified against a live instance), so the caller can match it
+ * exactly; when absent, the caller falls back to the `loaded: true` entry. Both vision and
+ * thinking are known ONLY for the loaded model — unloaded models have no detection path
+ * (issues #35, #37). Crucially this call never touches huggingface.co, unlike the per-model
+ * `check-vision` probe (see file header).
+ *
+ * Best-effort by contract: any failure (older Studio versions without the endpoint → 404,
+ * 401, refused connection, malformed body) yields `undefined` — vision and thinking stay off
+ * everywhere, i.e. the conservative pre-fix behaviour. Never throws.
+ */
+async function loadedStatus(
+  probe: Probe,
+  headers: Record<string, string>,
+): Promise<{ id?: string; vision: boolean; reasoning: boolean } | undefined> {
+  try {
+    const r = await probe(INFERENCE_STATUS_PATH, { headers });
+    if (!r.ok || r.status !== 200) return undefined;
+    const body = r.json as UnslothInferenceStatus | undefined;
+    if (!body) return undefined;
+    const result: { id?: string; vision: boolean; reasoning: boolean } = {
+      vision: body.is_vision === true,
+      reasoning: body.supports_reasoning === true,
+    };
+    if (typeof body.active_model === "string") result.id = body.active_model;
+    return result;
+  } catch {
+    return undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,24 +297,47 @@ class UnslothAdapter implements BackendAdapter {
     const body = r.json as UnslothModelsResponse | undefined;
     if (!Array.isArray(body?.data)) return [];
 
-    return body.data
-      .filter((entry): entry is UnslothModelEntry => typeof entry?.id === "string")
-      .map((entry): ModelDescriptor => {
-        const contextWindow = contextWindowFor(entry);
-        const descriptor: ModelDescriptor = {
-          id: entry.id,
-          name: entry.display_name ?? entry.id,
-          input: ["text"],
-          reasoning: false,
-          embeddings: isEmbeddingId(entry.id),
-          loaded: entry.loaded === true,
-          raw: entry,
-        };
-        // Omitted entirely when unknown, so the cached descriptor never asserts a context
-        // the server did not report — and picks up the real value once the model is loaded.
-        if (contextWindow !== undefined) descriptor.contextWindow = contextWindow;
-        return descriptor;
-      });
+    const entries = body.data.filter(
+      (entry): entry is UnslothModelEntry => typeof entry?.id === "string",
+    );
+
+    // /v1/models carries no modality/thinking info. Both vision and thinking come from ONE
+    // /api/inference/status call describing the loaded backend — which, unlike the per-model
+    // check-vision probe, never touches HuggingFace (see file header). Known only for the
+    // loaded model; unloaded models degrade to text-only / no-thinking. The helper is
+    // internally defensive and never rejects.
+    const status = await loadedStatus(probe, headers);
+
+    // The status endpoint describes exactly one model. Match it by active_model id; fall back
+    // to the `loaded: true` entry when it names nothing.
+    const isLoadedTarget = (entry: UnslothModelEntry): boolean =>
+      status === undefined
+        ? false
+        : status.id === undefined
+          ? entry.loaded === true
+          : entry.id === status.id;
+
+    return entries.map((entry): ModelDescriptor => {
+      const contextWindow = contextWindowFor(entry);
+      const target = isLoadedTarget(entry);
+      // Vision known only for the loaded model (issue #35); unloaded → text-only.
+      const isVision = target && status?.vision === true;
+      // Thinking metadata exists only for the loaded model (issue #37).
+      const isReasoning = target && status?.reasoning === true;
+      const descriptor: ModelDescriptor = {
+        id: entry.id,
+        name: entry.display_name ?? entry.id,
+        input: isVision ? ["text", "image"] : ["text"],
+        reasoning: isReasoning,
+        embeddings: isEmbeddingId(entry.id),
+        loaded: entry.loaded === true,
+        raw: entry,
+      };
+      // Omitted entirely when unknown, so the cached descriptor never asserts a context
+      // the server did not report — and picks up the real value once the model is loaded.
+      if (contextWindow !== undefined) descriptor.contextWindow = contextWindow;
+      return descriptor;
+    });
   }
 
   // --- introspectLoaded ----------------------------------------------------------------------

@@ -24,6 +24,11 @@ import { unslothAdapter } from "../../src/adapters/unsloth.ts";
 const LOADED_MODEL_ID = "unsloth/Qwen3.8-27B-GGUF";
 const UNLOADED_MODEL_ID = "Qwen3.6-35B-A3B-UD-Q4_K_XL";
 const EMBED_ID = "nomic-embed-text-v1.5";
+/**
+ * A second loaded entry that is NOT the status endpoint's `active_model` — must stay
+ * text-only / no-thinking, since both capabilities are known only for the active model.
+ */
+const VLM_ID = "unsloth/Qwen2.5-VL-7B-Instruct-GGUF";
 
 /** Captured verbatim: `GET /v1/models` with no (or an invalid) Authorization header. */
 const UNAUTHENTICATED_RESPONSE: ProbeResult = {
@@ -72,7 +77,36 @@ const AUTHENTICATED_RESPONSE: ProbeResult = {
         loaded: false,
         display_name: EMBED_ID,
       },
+      {
+        // Loaded but not active — see the VLM_ID note above.
+        id: VLM_ID,
+        object: "model",
+        owned_by: "unsloth-studio",
+        loaded: true,
+        display_name: VLM_ID,
+      },
     ],
+  },
+};
+
+/**
+ * Studio's loaded-backend status (`GET /api/inference/status`) — the single source for BOTH
+ * vision (#35) and thinking (#37) metadata, and the only capability probe this adapter issues
+ * (deliberately NOT `/api/models/check-vision/{id}`, whose HF fallback makes Studio hit
+ * huggingface.co). Reports the fixture's active model as a reasoning-capable TEXT model;
+ * `active_model` carries the same public id as the `/v1/models` entry.
+ */
+const INFERENCE_STATUS_RESPONSE: ProbeResult = {
+  status: 200,
+  ok: true,
+  headers: { server: "unsloth-studio", "content-type": "application/json" },
+  json: {
+    active_model: LOADED_MODEL_ID,
+    is_vision: false,
+    supports_reasoning: true,
+    reasoning_style: "enable_thinking_effort",
+    reasoning_effort_levels: ["low", "medium", "high", "xhigh"],
+    reasoning_always_on: false,
   },
 };
 
@@ -141,6 +175,7 @@ export const unslothFixture: AdapterFixture = {
   routes: {
     "/v1/models": MODELS_ROUTE,
     "/api/settings/openai-auto-switch": AUTO_SWITCH_OFF_RESPONSE,
+    "/api/inference/status": INFERENCE_STATUS_RESPONSE,
   },
 
   negativeRoutes: NEGATIVE_ROUTES,
@@ -153,9 +188,9 @@ export const unslothFixture: AdapterFixture = {
       confidenceMax: 1.0,
     },
     models: {
-      includedIds: [LOADED_MODEL_ID, UNLOADED_MODEL_ID],
+      includedIds: [LOADED_MODEL_ID, UNLOADED_MODEL_ID, VLM_ID],
       excludedIds: [EMBED_ID],
-      minCount: 2,
+      minCount: 3,
     },
     loadedState: {
       anyOf: [LOADED_MODEL_ID],

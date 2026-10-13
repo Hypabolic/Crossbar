@@ -11,7 +11,7 @@
 import { describe, it, expect } from "vitest";
 
 import { runConformance } from "../conformance/run-conformance.ts";
-import { createFakeProbe } from "../conformance/fake-probe.ts";
+import { createFakeProbe, type RouteMap } from "../conformance/fake-probe.ts";
 import { unslothAdapter } from "../../src/adapters/unsloth.ts";
 import { unslothFixture } from "./unsloth.fixture.ts";
 import { Capability } from "../../src/core/capability.ts";
@@ -195,6 +195,294 @@ describe("[unsloth] adapter-specific", () => {
         contextWindow: 262144,
       });
       expect(entry.contextWindow).toBe(262144);
+    });
+  });
+
+  // Regression (issue #35): the adapter used to hardcode input: ["text"] for every model
+  // because /v1/models carries no modality info — Pi then silently replaced attached images
+  // with "(image omitted: model does not support images)", so VLMs appeared to have no vision.
+  describe("vision detection (issue #35)", () => {
+    const server = {
+      kind: "unsloth" as const,
+      baseUrl: "http://127.0.0.1:8888",
+      auth: "apiKey" as const,
+      label: "Unsloth Studio",
+      confidence: 0.95,
+    };
+    const cred = { mode: "apiKey" as const, apiKey: "sk-unsloth-test-key" };
+
+    // Vision is probed ONLY for loaded models (unloaded ones would make Studio hit HF), so
+    // every model under test here is marked loaded to exercise the probe path.
+    // Vision comes from /api/inference/status (the loaded backend), NOT from a per-model
+    // check-vision probe (which would make Studio hit huggingface.co). The status endpoint
+    // describes exactly one loaded model, matched by active_model.
+    const visionProbe = (id: string, isVision: boolean) =>
+      createFakeProbe({
+        "/v1/models": {
+          status: 200,
+          ok: true,
+          headers: { server: "unsloth-studio" },
+          json: { data: [{ id, owned_by: "unsloth-studio", loaded: true }] },
+        },
+        "/api/inference/status": {
+          status: 200,
+          ok: true,
+          headers: { server: "unsloth-studio" },
+          json: { active_model: id, is_vision: isVision },
+        },
+      });
+
+    it("registers a model as [text, image] when status reports is_vision: true", async () => {
+      const models = await unslothAdapter.listModels(
+        server,
+        cred,
+        visionProbe("unsloth/Qwen2.5-VL-7B-Instruct-GGUF", true),
+      );
+      expect(models).toHaveLength(1);
+      expect(models[0]?.input).toEqual(["text", "image"]);
+    });
+
+    it("keeps text models at [text] when status reports is_vision: false", async () => {
+      const models = await unslothAdapter.listModels(
+        server,
+        cred,
+        visionProbe("unsloth/Qwen3.8-27B-GGUF", false),
+      );
+      expect(models[0]?.input).toEqual(["text"]);
+    });
+
+    it("passes the image modality through toPiModel", () => {
+      const entry = unslothAdapter.toPiModel(server, {
+        id: "vlm",
+        name: "vlm",
+        input: ["text", "image"],
+      });
+      expect(entry.input).toEqual(["text", "image"]);
+    });
+
+    it("does NOT probe unloaded models — they stay text-only even if the backend is a VLM", async () => {
+      const requestedPaths: string[] = [];
+      const probe: Probe = async (path) => {
+        requestedPaths.push(path);
+        if (path === "/v1/models") {
+          return {
+            status: 200,
+            ok: true,
+            headers: { server: "unsloth-studio" },
+            json: { data: [{ id: "unloaded-vlm", owned_by: "unsloth-studio", loaded: false }] },
+          };
+        }
+        // If this were ever hit it would report a VLM — the test asserts check-vision is NOT hit
+        // and that status names a DIFFERENT (loaded) model, so the unloaded one stays text-only.
+        if (path === "/api/inference/status") {
+          return {
+            status: 200,
+            ok: true,
+            headers: { server: "unsloth-studio" },
+            json: { active_model: "some-other-loaded-model", is_vision: true },
+          };
+        }
+        return { status: 0, ok: false, headers: {}, json: null };
+      };
+      const models = await unslothAdapter.listModels(server, cred, probe);
+      expect(models[0]?.input).toEqual(["text"]);
+      // The whole point of the fix: no check-vision request at all (no HF hit).
+      expect(requestedPaths.some((p) => p.startsWith("/api/models/check-vision/"))).toBe(false);
+    });
+
+    it("degrades to [text] when the status endpoint is missing (older Studio → status 0)", async () => {
+      const probe = createFakeProbe({
+        "/v1/models": {
+          status: 200,
+          ok: true,
+          headers: { server: "unsloth-studio" },
+          json: { data: [{ id: "some-vlm", owned_by: "unsloth-studio", loaded: true }] },
+        },
+      }); // no /api/inference/status fixture → refused connection
+      const models = await unslothAdapter.listModels(server, cred, probe);
+      expect(models[0]?.input).toEqual(["text"]);
+    });
+
+    it("degrades to [text] on 401 / non-200 / malformed bodies — never throws", async () => {
+      for (const json of [
+        { active_model: "m", is_vision: "yes" }, // not a boolean
+        { active_model: "m", other: true },
+        undefined,
+      ]) {
+        const probe = createFakeProbe({
+          "/v1/models": {
+            status: 200,
+            ok: true,
+            headers: { server: "unsloth-studio" },
+            json: { data: [{ id: "m", owned_by: "unsloth-studio", loaded: true }] },
+          },
+          "/api/inference/status":
+            json === undefined
+              ? { status: 401, ok: false, headers: { server: "unsloth-studio" }, json: null }
+              : { status: 200, ok: true, headers: { server: "unsloth-studio" }, json },
+        });
+        const models = await unslothAdapter.listModels(server, cred, probe);
+        expect(models[0]?.input).toEqual(["text"]);
+      }
+    });
+
+    it("reads vision from /api/inference/status and sends the bearer key — never check-vision", async () => {
+      const seenPaths: string[] = [];
+      let statusHeaders: Record<string, string> | undefined;
+      const probe: Probe = async (path, init) => {
+        seenPaths.push(path);
+        if (path === "/v1/models") {
+          return {
+            status: 200,
+            ok: true,
+            headers: { server: "unsloth-studio" },
+            json: {
+              data: [{ id: "unsloth/Qwen2.5-VL-7B-Instruct-GGUF", owned_by: "unsloth-studio", loaded: true }],
+            },
+          };
+        }
+        statusHeaders = init?.headers;
+        return {
+          status: 200,
+          ok: true,
+          headers: { server: "unsloth-studio" },
+          json: { active_model: "unsloth/Qwen2.5-VL-7B-Instruct-GGUF", is_vision: true },
+        };
+      };
+      const models = await unslothAdapter.listModels(server, cred, probe);
+      expect(seenPaths).toContain("/api/inference/status");
+      expect(seenPaths.some((p) => p.startsWith("/api/models/check-vision/"))).toBe(false);
+      expect(statusHeaders?.["Authorization"]).toBe("Bearer sk-unsloth-test-key");
+      expect(models[0]?.input).toEqual(["text", "image"]);
+    });
+  });
+
+  // Regression (issue #37): the adapter used to hardcode reasoning: false for every model.
+  // Studio exposes thinking metadata only for the LOADED model, via GET /api/inference/status
+  // (supports_reasoning + active_model carrying the same public id as /v1/models).
+  describe("thinking detection (issue #37)", () => {
+    const server = {
+      kind: "unsloth" as const,
+      baseUrl: "http://127.0.0.1:8888",
+      auth: "apiKey" as const,
+      label: "Unsloth Studio",
+      confidence: 0.95,
+    };
+    const cred = { mode: "apiKey" as const, apiKey: "sk-unsloth-test-key" };
+
+    const thinkingProbe = (statusJson: unknown) =>
+      createFakeProbe({
+        "/v1/models": {
+          status: 200,
+          ok: true,
+          headers: { server: "unsloth-studio" },
+          json: {
+            data: [
+              { id: "thinker", owned_by: "unsloth-studio", loaded: true },
+              { id: "plain", owned_by: "unsloth-studio", loaded: false },
+            ],
+          },
+        },
+        "/api/inference/status": {
+          status: 200,
+          ok: true,
+          headers: { server: "unsloth-studio" },
+          json: statusJson,
+        },
+      });
+
+    it("registers the loaded model as reasoning-capable, matched by active_model", async () => {
+      const models = await unslothAdapter.listModels(
+        server,
+        cred,
+        thinkingProbe({ active_model: "thinker", supports_reasoning: true }),
+      );
+      expect(models.find((m) => m.id === "thinker")?.reasoning).toBe(true);
+      expect(models.find((m) => m.id === "plain")?.reasoning).toBe(false);
+    });
+
+    it("falls back to the loaded entry when active_model is absent", async () => {
+      const models = await unslothAdapter.listModels(
+        server,
+        cred,
+        thinkingProbe({ supports_reasoning: true }),
+      );
+      expect(models.find((m) => m.id === "thinker")?.reasoning).toBe(true);
+      expect(models.find((m) => m.id === "plain")?.reasoning).toBe(false);
+    });
+
+    it("applies nothing when supports_reasoning is false or malformed", async () => {
+      for (const json of [{ active_model: "thinker", supports_reasoning: false }, { supports_reasoning: "yes" }]) {
+        const models = await unslothAdapter.listModels(server, cred, thinkingProbe(json));
+        expect(models.every((m) => m.reasoning === false)).toBe(true);
+      }
+    });
+
+    it("degrades to all-false when the endpoint is missing (older Studio) or fails — never throws", async () => {
+      // No /api/inference/status fixture → refused connection (status 0).
+      const probe = createFakeProbe({
+        "/v1/models": {
+          status: 200,
+          ok: true,
+          headers: { server: "unsloth-studio" },
+          json: { data: [{ id: "thinker", owned_by: "unsloth-studio", loaded: true }] },
+        },
+      });
+      const models = await unslothAdapter.listModels(server, cred, probe);
+      expect(models[0]?.reasoning).toBe(false);
+
+      for (const status of [401, 404] as const) {
+        const failingProbe = createFakeProbe({
+          "/v1/models": {
+            status: 200,
+            ok: true,
+            headers: { server: "unsloth-studio" },
+            json: { data: [{ id: "thinker", owned_by: "unsloth-studio", loaded: true }] },
+          },
+          "/api/inference/status": {
+            status,
+            ok: false,
+            headers: { server: "unsloth-studio" },
+            json: null,
+          },
+        });
+        const failingModels = await unslothAdapter.listModels(server, cred, failingProbe);
+        expect(failingModels[0]?.reasoning).toBe(false);
+      }
+    });
+
+    it("sends the bearer key with the status request", async () => {
+      let seenHeaders: Record<string, string> | undefined;
+      const probe: Probe = async (path, init) => {
+        if (path === "/v1/models") {
+          return {
+            status: 200,
+            ok: true,
+            headers: { server: "unsloth-studio" },
+            json: { data: [{ id: "thinker", owned_by: "unsloth-studio", loaded: true }] },
+          };
+        }
+        seenHeaders = init?.headers;
+        return {
+          status: 200,
+          ok: true,
+          headers: { server: "unsloth-studio" },
+          json: { active_model: "thinker", supports_reasoning: true },
+        };
+      };
+      const models = await unslothAdapter.listModels(server, cred, probe);
+      expect(seenHeaders?.["Authorization"]).toBe("Bearer sk-unsloth-test-key");
+      expect(models[0]?.reasoning).toBe(true);
+    });
+
+    it("passes reasoning through toPiModel", () => {
+      const entry = unslothAdapter.toPiModel(server, {
+        id: "thinker",
+        name: "thinker",
+        input: ["text"],
+        reasoning: true,
+      });
+      expect(entry.reasoning).toBe(true);
     });
   });
 
