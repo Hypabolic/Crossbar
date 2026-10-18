@@ -271,6 +271,63 @@ describe("llama.cpp reported model limits", () => {
   });
 });
 
+describe("llama.cpp vision detection (/props modalities)", () => {
+  it.each([
+    {
+      name: "object map with vision enabled (live llama-server shape)",
+      props: { modalities: { vision: true, video: true, audio: false } },
+      expected: ["text", "image"],
+    },
+    {
+      name: "object map with vision disabled",
+      props: { modalities: { vision: false, video: false, audio: false } },
+      expected: ["text"],
+    },
+    {
+      name: "object map using an image key",
+      props: { modalities: { image: true } },
+      expected: ["text", "image"],
+    },
+    {
+      name: "legacy string array with an image entry",
+      props: { modalities: ["text", "image"] },
+      expected: ["text", "image"],
+    },
+    {
+      name: "legacy string array with a vision entry",
+      props: { modalities: ["text", "vision"] },
+      expected: ["text", "image"],
+    },
+    {
+      name: "text-only string array",
+      props: { modalities: ["text"] },
+      expected: ["text"],
+    },
+    {
+      name: "missing modalities field",
+      props: {},
+      expected: ["text"],
+    },
+  ])("$name", async ({ props, expected }) => {
+    const [model] = await listModels(
+      [{ id: "vision-check", meta: null, status: null }],
+      props,
+    );
+    expect(model?.input).toEqual(expected);
+  });
+
+  it("does not copy root /props vision onto router rows", async () => {
+    const models = await listModels(
+      [
+        { id: "vlm", status: { value: "loaded" } },
+        { id: "text", status: { value: "unloaded" } },
+      ],
+      { modalities: { vision: true } },
+    );
+    expect(models.map((model) => model.input)).toEqual([["text"], ["text"]]);
+  });
+});
+
 describe("llama.cpp Pi model limits", () => {
   it("uses the Pi-boundary sentinels for absent or non-positive descriptor limits", () => {
     const absent = llamacppAdapter.toPiModel(SERVER, {
