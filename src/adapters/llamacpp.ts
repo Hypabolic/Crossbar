@@ -52,6 +52,15 @@ interface V1ModelsBody {
     status?: {
       args?: string[] | null;
     } | null;
+    /**
+     * Per-model modalities. Current llama-server (single-model and router)
+     * reports `input_modalities` as a string array. Older single-model builds
+     * omit it; vision then comes from root `/props`. Router rows without this
+     * field stay text-only — root `/props` is not a per-model document.
+     */
+    architecture?: {
+      input_modalities?: string[] | Record<string, unknown> | null;
+    } | null;
   }>;
 }
 
@@ -212,13 +221,20 @@ class LlamacppAdapter implements BackendAdapter {
       propsParams?.max_tokens,
       props?.default_generation_settings?.n_predict,
     );
-    // Root /props describes one loaded model. Router rows are a catalogue, so a
-    // global modalities map must not mark every row as vision-capable.
+    // Root /props modalities describe the loaded model on a single-model
+    // server. A row's own input_modalities wins when present. Router rows
+    // without that field stay text-only so one model's /props map is not
+    // copied onto the whole catalogue.
     const rootVision = hasVisionModality(props?.modalities);
 
     return data.map((entry) => {
       const isRouterRow = entry.status != null;
-      const hasVision = isRouterRow ? false : rootVision;
+      const rowModalities = entry.architecture?.input_modalities;
+      const hasVision = rowModalities
+        ? hasVisionModality(rowModalities)
+        : isRouterRow
+          ? false
+          : rootVision;
       const contextWindow = firstPositiveSafeInteger(
         entry.meta?.n_ctx,
         isRouterRow ? undefined : propsNCtx,
