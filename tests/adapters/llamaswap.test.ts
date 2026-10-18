@@ -114,11 +114,13 @@ describe("llamaswap model limits", () => {
         meta: {
           llamaswap: {
             context_length: 65_536,
-            contextWindow: 65_536,
+            contextWindow: 999_999,
             max_tokens: 4096,
             maxTokens: 4096,
             n_predict: 4096,
           },
+          context_length: 111_111,
+          n_ctx: 222_222,
         },
       },
     ]);

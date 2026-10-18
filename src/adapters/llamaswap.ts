@@ -63,9 +63,10 @@ function positiveContextLength(value: unknown): number | undefined {
 }
 
 /**
- * Context length from a `/v1/models` row. Prefer a top-level `context_length`.
- * llama-swap does not send that field: `metadata.context_length` from config.yaml
- * is echoed under `meta.llamaswap.context_length`. Other metadata keys are ignored.
+ * Context length from a `/v1/models` row. Prefer a top-level `context_length`
+ * (capabilities on current llama-swap). Otherwise use `metadata.context_length`
+ * from config.yaml, which is echoed under `meta.llamaswap.context_length`.
+ * Other metadata keys are ignored.
  */
 function extractContextLength(entry: {
   context_length?: number | null;
