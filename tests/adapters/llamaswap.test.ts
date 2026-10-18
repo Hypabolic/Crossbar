@@ -83,27 +83,89 @@ describe("llamaswap model limits", () => {
     }
   });
 
-  it("ignores context- and output-looking values in arbitrary llama-swap metadata", async () => {
+  it("uses the distinct context lengths llama-swap reports under meta.llamaswap", async () => {
+    const { probe } = modelsProbe([
+      {
+        id: "Deepseek-V4-Flash",
+        object: "model",
+        owned_by: "llama-swap",
+        meta: { llamaswap: { context_length: 131072, type: "model" } },
+        status: { value: "unloaded" },
+      },
+      {
+        id: "Laguna-S-2.1",
+        object: "model",
+        owned_by: "llama-swap",
+        meta: { llamaswap: { context_length: 262144, type: "model" } },
+        status: { value: "unloaded" },
+      },
+    ]);
+
+    const models = await llamaswapAdapter.listModels(SERVER, { mode: "none" }, probe);
+    const windows = models.map((model) => llamaswapAdapter.toPiModel(SERVER, model).contextWindow);
+
+    expect(windows).toEqual([131072, 262144]);
+  });
+
+  it("reads context_length nested under meta.llamaswap and ignores other metadata", async () => {
     const { probe, paths } = modelsProbe([
       {
         id: "metadata-only",
         meta: {
           llamaswap: {
             context_length: 65_536,
-            contextWindow: 65_536,
+            contextWindow: 999_999,
             max_tokens: 4096,
             maxTokens: 4096,
             n_predict: 4096,
           },
+          context_length: 111_111,
+          n_ctx: 222_222,
         },
       },
     ]);
 
     const models = await llamaswapAdapter.listModels(SERVER, { mode: "none" }, probe);
 
-    expect(models[0]).not.toHaveProperty("contextWindow");
+    expect(models[0]?.contextWindow).toBe(65_536);
     expect(models[0]).not.toHaveProperty("maxTokens");
     expect(paths).toEqual(["/v1/models"]);
+
+    const piModel = llamaswapAdapter.toPiModel(SERVER, models[0]!);
+    expect(piModel.contextWindow).toBe(65_536);
+  });
+
+  it("prefers a top-level context_length over meta.llamaswap", async () => {
+    const { probe } = modelsProbe([
+      {
+        id: "both",
+        context_length: 131_072,
+        meta: { llamaswap: { context_length: 262_144 } },
+      },
+    ]);
+
+    const [model] = await llamaswapAdapter.listModels(SERVER, { mode: "none" }, probe);
+
+    expect(model?.contextWindow).toBe(131_072);
+  });
+
+  it("omits invalid nested llama-swap context_length values", async () => {
+    const { probe } = modelsProbe([
+      { id: "nested-zero", meta: { llamaswap: { context_length: 0 } } },
+      { id: "nested-negative", meta: { llamaswap: { context_length: -1 } } },
+      { id: "nested-fractional", meta: { llamaswap: { context_length: 4096.5 } } },
+      { id: "nested-unsafe", meta: { llamaswap: { context_length: Number.MAX_SAFE_INTEGER + 1 } } },
+      { id: "nested-string", meta: { llamaswap: { context_length: "262144" } } },
+      { id: "nested-missing", meta: { llamaswap: { type: "model" } } },
+      { id: "meta-array", meta: { llamaswap: [] } },
+    ]);
+
+    const models = await llamaswapAdapter.listModels(SERVER, { mode: "none" }, probe);
+
+    for (const model of models) {
+      expect(model).not.toHaveProperty("contextWindow");
+      expect(llamaswapAdapter.toPiModel(SERVER, model).contextWindow).toBe(128_000);
+    }
   });
 });
 
