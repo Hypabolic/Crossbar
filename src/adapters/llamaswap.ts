@@ -56,6 +56,27 @@ function objectProperty(value: unknown, key: string): unknown {
   return (value as Record<string, unknown>)[key];
 }
 
+function positiveContextLength(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
+/**
+ * Context length from a `/v1/models` row. Prefer a top-level `context_length`.
+ * llama-swap does not send that field: `metadata.context_length` from config.yaml
+ * is echoed under `meta.llamaswap.context_length`. Other metadata keys are ignored.
+ */
+function extractContextLength(entry: {
+  context_length?: number | null;
+  meta?: Record<string, unknown> | null;
+}): number | undefined {
+  const direct = positiveContextLength(entry.context_length);
+  if (direct !== undefined) return direct;
+  const nested = objectProperty(objectProperty(entry.meta, "llamaswap"), "context_length");
+  return positiveContextLength(nested);
+}
+
 function modelName(id: string, name: unknown): string {
   if (typeof name !== "string") return id;
   const trimmed = name.trim();
@@ -236,12 +257,7 @@ class LlamaswapAdapter implements BackendAdapter {
     const body = r.json as V1ModelsBody | undefined;
     const data = body?.data ?? [];
     return data.map((entry) => {
-      const contextWindow =
-        typeof entry.context_length === "number" &&
-        Number.isSafeInteger(entry.context_length) &&
-        entry.context_length > 0
-          ? entry.context_length
-          : undefined;
+      const contextWindow = extractContextLength(entry);
       const descriptor: ModelDescriptor = {
         id: entry.id,
         name: modelName(entry.id, entry.name),
