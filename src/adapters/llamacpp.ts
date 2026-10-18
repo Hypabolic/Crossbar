@@ -212,10 +212,13 @@ class LlamacppAdapter implements BackendAdapter {
       propsParams?.max_tokens,
       props?.default_generation_settings?.n_predict,
     );
-    const hasVision = hasVisionModality(props?.modalities);
+    // Root /props describes one loaded model. Router rows are a catalogue, so a
+    // global modalities map must not mark every row as vision-capable.
+    const rootVision = hasVisionModality(props?.modalities);
 
     return data.map((entry) => {
       const isRouterRow = entry.status != null;
+      const hasVision = isRouterRow ? false : rootVision;
       const contextWindow = firstPositiveSafeInteger(
         entry.meta?.n_ctx,
         isRouterRow ? undefined : propsNCtx,

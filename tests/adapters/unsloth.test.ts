@@ -411,6 +411,43 @@ describe("[unsloth] adapter-specific", () => {
       expect(models.find((m) => m.id === "plain")?.reasoning).toBe(false);
     });
 
+    it("falls back to the single loaded row when active_model matches nothing", async () => {
+      const models = await unslothAdapter.listModels(
+        server,
+        cred,
+        thinkingProbe({ active_model: "thinker.gguf", supports_reasoning: true, is_vision: true }),
+      );
+      expect(models.find((m) => m.id === "thinker")?.reasoning).toBe(true);
+      expect(models.find((m) => m.id === "thinker")?.input).toEqual(["text", "image"]);
+      expect(models.find((m) => m.id === "plain")?.reasoning).toBe(false);
+      expect(models.find((m) => m.id === "plain")?.input).toEqual(["text"]);
+    });
+
+    it("does not copy one backend's flags onto every loaded row", async () => {
+      const probe = createFakeProbe({
+        "/v1/models": {
+          status: 200,
+          ok: true,
+          headers: { server: "unsloth-studio" },
+          json: {
+            data: [
+              { id: "text-model", owned_by: "unsloth-studio", loaded: true },
+              { id: "vlm", owned_by: "unsloth-studio", loaded: true },
+            ],
+          },
+        },
+        "/api/inference/status": {
+          status: 200,
+          ok: true,
+          headers: { server: "unsloth-studio" },
+          json: { is_vision: true, supports_reasoning: true },
+        },
+      });
+      const models = await unslothAdapter.listModels(server, cred, probe);
+      expect(models.every((model) => model.reasoning === false)).toBe(true);
+      expect(models.every((model) => model.input.length === 1 && model.input[0] === "text")).toBe(true);
+    });
+
     it("applies nothing when supports_reasoning is false or malformed", async () => {
       for (const json of [{ active_model: "thinker", supports_reasoning: false }, { supports_reasoning: "yes" }]) {
         const models = await unslothAdapter.listModels(server, cred, thinkingProbe(json));

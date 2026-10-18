@@ -308,18 +308,27 @@ class UnslothAdapter implements BackendAdapter {
     // internally defensive and never rejects.
     const status = await loadedStatus(probe, headers);
 
-    // The status endpoint describes exactly one model. Match it by active_model id; fall back
-    // to the `loaded: true` entry when it names nothing.
-    const isLoadedTarget = (entry: UnslothModelEntry): boolean =>
+    // The status endpoint describes exactly one model. Match it by active_model id.
+    // Studio sometimes reports a different string than the catalogue id (a `.gguf` name,
+    // a path). When the name matches nothing, fall back only if exactly one row is loaded.
+    // Several loaded rows and no match stay conservative — one backend's flags must not
+    // be copied onto every loaded model.
+    const loadedIds = entries.filter((entry) => entry.loaded === true).map((entry) => entry.id);
+    const namedId = status?.id;
+    const namedMatches =
+      namedId !== undefined && entries.some((entry) => entry.id === namedId);
+    const targetId =
       status === undefined
-        ? false
-        : status.id === undefined
-          ? entry.loaded === true
-          : entry.id === status.id;
+        ? undefined
+        : namedMatches
+          ? namedId
+          : loadedIds.length === 1
+            ? loadedIds[0]
+            : undefined;
 
     return entries.map((entry): ModelDescriptor => {
       const contextWindow = contextWindowFor(entry);
-      const target = isLoadedTarget(entry);
+      const target = targetId !== undefined && entry.id === targetId;
       // Vision known only for the loaded model (issue #35); unloaded → text-only.
       const isVision = target && status?.vision === true;
       // Thinking metadata exists only for the loaded model (issue #37).

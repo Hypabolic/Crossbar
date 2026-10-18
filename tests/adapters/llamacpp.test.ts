@@ -315,6 +315,17 @@ describe("llama.cpp vision detection (/props modalities)", () => {
     );
     expect(model?.input).toEqual(expected);
   });
+
+  it("does not copy root /props vision onto router rows", async () => {
+    const models = await listModels(
+      [
+        { id: "vlm", status: { value: "loaded" } },
+        { id: "text", status: { value: "unloaded" } },
+      ],
+      { modalities: { vision: true } },
+    );
+    expect(models.map((model) => model.input)).toEqual([["text"], ["text"]]);
+  });
 });
 
 describe("llama.cpp Pi model limits", () => {
