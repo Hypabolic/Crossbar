@@ -326,6 +326,34 @@ describe("llama.cpp vision detection (/props modalities)", () => {
     );
     expect(models.map((model) => model.input)).toEqual([["text"], ["text"]]);
   });
+
+  it("keeps per-model vision on a router catalogue and ignores root /props", async () => {
+    const models = await listModels(
+      [
+        {
+          id: "vlm",
+          status: { value: "unloaded", args: [] },
+          architecture: { input_modalities: ["text", "image"] },
+        },
+        {
+          id: "text-only",
+          status: { value: "loaded", args: ["-c", "8192"] },
+          architecture: { input_modalities: ["text"] },
+        },
+        {
+          id: "legacy",
+          status: { value: "unloaded", args: [] },
+        },
+      ],
+      { role: "router", model_path: "none", modalities: { vision: true } },
+    );
+
+    expect(models.map((model) => [model.id, model.input])).toEqual([
+      ["vlm", ["text", "image"]],
+      ["text-only", ["text"]],
+      ["legacy", ["text"]],
+    ]);
+  });
 });
 
 describe("llama.cpp Pi model limits", () => {
