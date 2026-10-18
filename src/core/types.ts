@@ -23,6 +23,11 @@ export interface ProbeInit {
   body?: string;
   /** Per-request timeout. Discovery uses a short budget (default supplied by the engine). */
   timeoutMs?: number;
+  /**
+   * `"manual"` returns a 3xx as-is. The default follows redirects, which hides an
+   * HTTP→HTTPS hop from manual add.
+   */
+  redirect?: "follow" | "manual";
 }
 
 export interface ProbeResult {

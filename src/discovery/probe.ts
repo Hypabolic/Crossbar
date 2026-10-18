@@ -62,9 +62,9 @@ const TLS_HANDSHAKE_ERROR_CODES = new Set<string>([
   "ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR",
   "ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE",
   "ERR_SSL_TLSV1_ALERT_UNRECOGNIZED_NAME",
+  // Node 22 reports nginx's unrecognized_name alert without the ALERT segment.
+  "ERR_SSL_TLSV1_UNRECOGNIZED_NAME",
   "ERR_SSL_TLSV1_ALERT_ACCESS_DENIED",
-  "ERR_SSL_WRONG_VERSION_NUMBER",
-  "EPROTO",
 ]);
 
 /** Walk an error's `cause` chain, returning the first `code` string found (up to 5 deep). */
@@ -216,6 +216,7 @@ export function createProbe(baseUrl: string, opts?: CreateProbeOptions): Probe {
           method: init?.method ?? "GET",
           headers: requestHeaders,
           signal: controller.signal,
+          redirect: init?.redirect ?? "follow",
         };
         // Only set body when defined — exactOptionalPropertyTypes forbids undefined for BodyInit
         if (init?.body !== undefined) {

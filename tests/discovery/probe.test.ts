@@ -289,6 +289,39 @@ describe("createProbe", () => {
     expect(result.tlsError).toBeUndefined();
   });
 
+  it("flags nginx unrecognized_name as a handshake error and not a wrong-version HTTP listener", async () => {
+    stubFetch(async () => {
+      throw Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("unrecognized name"), {
+          code: "ERR_SSL_TLSV1_UNRECOGNIZED_NAME",
+        }),
+      });
+    });
+    const handshake = await createProbe("https://192.168.188.102")("/");
+    expect(handshake.tlsHandshakeError).toBe(true);
+
+    stubFetch(async () => {
+      throw Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("wrong version number"), {
+          code: "ERR_SSL_WRONG_VERSION_NUMBER",
+        }),
+      });
+    });
+    const httpOnTlsPort = await createProbe("https://192.168.188.102")("/");
+    expect(httpOnTlsPort.tlsHandshakeError).toBeUndefined();
+    expect(httpOnTlsPort.tlsError).toBeUndefined();
+  });
+
+  it("returns a 3xx when the caller asks not to follow redirects", async () => {
+    stubFetch(async (_input, init) => {
+      expect(init?.redirect).toBe("manual");
+      return makeFakeResponse(308, "");
+    });
+    const result = await createProbe("http://guru.fritz.box")("/", { redirect: "manual" });
+    expect(result.status).toBe(308);
+    expect(result.ok).toBe(false);
+  });
+
   it("does NOT set tlsError when insecureTLS is enabled (verification is bypassed)", async () => {
     // With insecureTLS the probe uses the node:http(s) path, not global fetch, so a cert
     // error can no longer occur; a TLS failure must never be re-flagged in that mode.

@@ -17,6 +17,7 @@ import { CLOUD_KINDS } from "../core/capability.ts";
 import type { BackendAdapter } from "../core/backend-adapter.ts";
 import type { DiscoveredServer, Probe } from "../core/types.ts";
 import { createProbe } from "./probe.ts";
+import { lookup } from "node:dns/promises";
 import { clearCache, resolveHostname, resolveUrlHostname, shortHostname } from "./dns.ts";
 
 // ---------------------------------------------------------------------------
@@ -217,7 +218,6 @@ export async function probeOrigin(
       ? probeFactory(target, timeoutMs)
       : createProbe(target, { defaultTimeoutMs: timeoutMs, insecureTLS: insecure });
 
-  // Run all adapter fingerprints concurrently for one target URL + probe.
   const runFingerprints = async (target: string, p: Probe): Promise<DiscoveredServer | null> => {
     const results = await Promise.all(
       adapters.map(async (adapter): Promise<DiscoveredServer | null> => {
@@ -231,47 +231,68 @@ export async function probeOrigin(
     return selectBest(results.filter((r): r is DiscoveredServer => r !== null));
   };
 
-  const best = await runFingerprints(origin, makeProbe(origin, insecureTLS));
-  if (best) return best;
+  // One probe per attempt, so a TLS failure during fingerprinting is visible without a
+  // second connection. Dead hosts never pay for an extra timeout.
+  const attempt = async (
+    target: string,
+    insecure: boolean,
+  ): Promise<{ best: DiscoveredServer | null; tlsError: boolean; handshake: boolean }> => {
+    let tlsError = false;
+    let handshake = false;
+    const inner = makeProbe(target, insecure);
+    const probe: Probe = async (path, init) => {
+      const res = await inner(path, init);
+      if (res.tlsError) tlsError = true;
+      if (res.tlsHandshakeError) handshake = true;
+      return res;
+    };
+    return { best: await runFingerprints(target, probe), tlsError, handshake };
+  };
+
+  const first = await attempt(origin, insecureTLS);
+  if (first.best) return first.best;
   if (insecureTLS || !origin.startsWith("https://")) return null;
+  if (!first.tlsError && !first.handshake) return null;
 
-  // No adapter matched on an HTTPS origin. A verified probe fails on ANY untrusted cert or a
-  // handshake rejection, so fingerprinting never had a fair chance. Inspect why, then retry.
-  const liveness = await makeProbe(origin, false)("/");
-
-  // (a) Untrusted certificate (handshake OK): re-fingerprint the SAME origin insecurely. Only
-  //     surface it \u2014 tagged tlsError so the trust prompt fires \u2014 if a real adapter matches;
-  //     otherwise it is an ordinary HTTPS device (router, NAS, ...) and we drop it.
-  if (liveness.tlsError) {
-    const insecureBest = await runFingerprints(origin, makeProbe(origin, true));
-    if (insecureBest) return { ...insecureBest, baseUrl: origin, tlsError: true };
-    return null;
+  // An IP URL fails name checks even when the certificate is valid for the PTR name,
+  // and an SNI-strict proxy aborts the handshake. Retry that name with verification
+  // still on before anyone is asked to disable it.
+  let hostIsIp = false;
+  try {
+    hostIsIp = isIpv4(new URL(origin).hostname);
+  } catch {
+    hostIsIp = false;
+  }
+  if (hostIsIp) {
+    const hostnameUrl = await hostnameVariant(origin);
+    if (hostnameUrl) {
+      const named = await attempt(hostnameUrl, false);
+      if (named.best) return { ...named.best, baseUrl: hostnameUrl };
+      if (named.tlsError) {
+        const insecureNamed = await attempt(hostnameUrl, true);
+        if (insecureNamed.best) {
+          return { ...insecureNamed.best, baseUrl: hostnameUrl, tlsError: true };
+        }
+      }
+      return null;
+    }
   }
 
-  // (b) Handshake rejected (e.g. SNI-strict reverse proxy refusing a bare-IP connection):
-  //     reverse-resolve the IP to a hostname and retry there so the correct SNI is sent.
-  //     The reverse name need not be unique or correct \u2014 we simply try it; on failure we drop.
-  if (liveness.tlsHandshakeError) {
-    const hostnameUrl = await hostnameVariant(origin);
-    if (!hostnameUrl) return null; // reverse lookup gave nothing new to try
-
-    // Verified first (cert may be valid for the hostname), then insecure on a cert error.
-    const verifiedBest = await runFingerprints(hostnameUrl, makeProbe(hostnameUrl, false));
-    if (verifiedBest) return { ...verifiedBest, baseUrl: hostnameUrl };
-
-    const nameLiveness = await makeProbe(hostnameUrl, false)("/");
-    if (nameLiveness.tlsError) {
-      const insecureBest = await runFingerprints(hostnameUrl, makeProbe(hostnameUrl, true));
-      if (insecureBest) return { ...insecureBest, baseUrl: hostnameUrl, tlsError: true };
-    }
+  // No usable hostname. A certificate error on the origin itself can still be a real
+  // backend the user may choose to trust. A handshake failure without a name cannot.
+  if (first.tlsError) {
+    const insecure = await attempt(origin, true);
+    if (insecure.best) return { ...insecure.best, baseUrl: origin, tlsError: true };
   }
   return null;
 }
 
 /**
- * Rewrite an HTTPS IP origin to use its reverse-DNS hostname, e.g.
- * `https://192.168.188.102:443` \u2192 `https://guru.fritz.box:443`. Returns null when the host is
- * not an IPv4 address or reverse resolution yields nothing different (nothing new to try).
+ * Rewrite an HTTPS IP origin to its reverse-DNS hostname, keeping the explicit port
+ * (`https://192.168.188.102:443` -> `https://guru.fritz.box:443`).
+ *
+ * Returns null unless the name forward-resolves back to the same IPv4 address, so a
+ * PTR record cannot steer the scan at a different host.
  */
 async function hostnameVariant(origin: string): Promise<string | null> {
   let parsed: URL;
@@ -282,9 +303,15 @@ async function hostnameVariant(origin: string): Promise<string | null> {
   }
   if (!isIpv4(parsed.hostname)) return null;
   const resolved = await resolveHostname(parsed.hostname);
-  if (resolved === parsed.hostname) return null; // no PTR record / same value
-  parsed.hostname = resolved;
-  return parsed.toString().replace(/\/+$/, "");
+  if (resolved === parsed.hostname) return null;
+  try {
+    const forward = await lookup(resolved, { family: 4 });
+    if (forward.address !== parsed.hostname) return null;
+  } catch {
+    return null;
+  }
+  const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+  return `${parsed.protocol}//${resolved}:${port}`;
 }
 
 // ────────────────────────────────────────────────────────────────────────────────

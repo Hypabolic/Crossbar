@@ -461,6 +461,14 @@ export function buildManageItems(adapter: BackendAdapter, enabled: boolean): Sel
  *
  * Returns the coerced origin string.  Throws if the result is not a valid URL.
  */
+function untrustedCertPrompt(baseUrl: string): string {
+  return (
+    `The certificate for ${baseUrl} could not be verified (self-signed or unknown issuer). ` +
+    `Trusting it lets Crossbar connect for discovery and health checks. Pi still verifies TLS ` +
+    `for chat and will fail until NODE_EXTRA_CA_CERTS points at your CA.`
+  );
+}
+
 export function normalizeManualUrl(input: string): string {
   let raw = input.trim();
 
@@ -1423,7 +1431,7 @@ export async function openOnboarding(
         const httpAlive = await (async () => {
           try {
             const p = createProbe(targetBaseUrl, { auth: { mode: "none" }, defaultTimeoutMs: 2000 });
-            const r = await p("/");
+            const r = await p("/", { redirect: "manual" });
             // A real backend answers 2xx/4xx directly; 0 = dead, 3xx = redirect (often to https).
             return r.status !== 0 && !(r.status >= 300 && r.status < 400);
           } catch {
@@ -1464,7 +1472,7 @@ export async function openOnboarding(
         }
         if (tlsBlocked) {
           const trust = await ctx.ui.select(
-            `The certificate for ${targetBaseUrl} could not be verified (self-signed or unknown issuer).`,
+            untrustedCertPrompt(targetBaseUrl),
             ["Do not add", "Trust this certificate and continue"],
           );
           if (trust !== "Trust this certificate and continue") continue;
@@ -1561,7 +1569,7 @@ export async function openOnboarding(
       // trust opt-in before it can be added (the scan never trusts certs implicitly).
       if (discoveredServer.tlsError) {
         const trust = await ctx.ui.select(
-          `The certificate for ${targetBaseUrl} could not be verified (self-signed or unknown issuer).`,
+          untrustedCertPrompt(targetBaseUrl),
           ["Do not add", "Trust this certificate and continue"],
         );
         if (trust !== "Trust this certificate and continue") continue;

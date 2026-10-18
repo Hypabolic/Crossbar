@@ -206,9 +206,16 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
         for (const srv of found) {
           const id = serverId(srv.kind, srv.baseUrl);
           if (reg.get(id)) continue; // already known
-          if (srv.auth !== "none" || !autoRegister) {
+          // An untrusted certificate must go through the /crossbar trust prompt.
+          // Auto-register would persist the server without insecureTLS, and the
+          // prompt never runs for a server that is already saved.
+          if (srv.tlsError === true || srv.auth !== "none" || !autoRegister) {
             if (ctx.hasUI) {
-              const reason = srv.auth !== "none" ? "needs an API key" : "auto-register is off";
+              const reason = srv.tlsError
+                ? "uses an untrusted certificate"
+                : srv.auth !== "none"
+                  ? "needs an API key"
+                  : "auto-register is off";
               ctx.ui.notify(`Crossbar: found ${srv.label} (${reason}) — run /crossbar to add it.`, "info");
             }
             continue;

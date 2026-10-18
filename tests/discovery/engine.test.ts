@@ -5,7 +5,21 @@
  * The real Probe is NOT used; instead fake adapters inspect the `baseUrl` argument directly.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+
+// Keep unit tests off the network. Reverse/forward DNS is covered in reverse-dns-retry.test.ts.
+vi.mock("node:dns/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:dns/promises")>();
+  return {
+    ...actual,
+    reverse: vi.fn(async () => {
+      throw new Error("no PTR");
+    }),
+    lookup: vi.fn(async () => {
+      throw new Error("no forward");
+    }),
+  };
+});
 import {
   discoverLocalhost,
   discoverLan,
@@ -108,13 +122,12 @@ describe("untrusted TLS certificate", () => {
         confidence: 0.95,
       };
     });
-    // Verified probes report a cert error; the insecure re-probe returns 200. We can't read the
-    // insecureTLS flag through ProbeFactory, so distinguish by call order WITHIN each probe: the
-    // insecure fingerprint pass is the only one whose adapter reads a 200. Simplest faithful
-    // model: any probe created AFTER the first two (verified fingerprint + liveness) is insecure.
+    // Verified probes report a cert error; the insecure re-probe returns 200. ProbeFactory
+    // cannot see the insecure flag, so the second probe built for this origin is the
+    // insecure pass (the first is the verified fingerprint; DNS is mocked to yield no PTR).
     let built = 0;
     const factory: ProbeFactory = () => {
-      const isInsecurePass = built++ >= 2;
+      const isInsecurePass = built++ >= 1;
       return async (): Promise<ProbeResult> =>
         isInsecurePass
           ? { status: 200, ok: true, headers: {}, text: "{}", json: {} }
