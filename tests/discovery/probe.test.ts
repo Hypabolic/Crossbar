@@ -239,4 +239,103 @@ describe("createProbe", () => {
     expect(capturedHeaders["authorization"]).toBe("Bearer sk-topsecret");
     expect(capturedHeaders["content-type"]).toBe("application/json");
   });
+
+  it("flags tlsError when fetch fails with a certificate verification error", async () => {
+    // undici surfaces TLS trust failures as an error whose `cause.code` is an OpenSSL code.
+    stubFetch(async () => {
+      throw Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("unable to get local issuer certificate"), {
+          code: "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+        }),
+      });
+    });
+
+    const probe = createProbe("https://guru.fritz.box");
+    const result = await probe("/health");
+
+    expect(result.status).toBe(0);
+    expect(result.ok).toBe(false);
+    expect(result.tlsError).toBe(true);
+  });
+
+  it("does NOT set tlsError for a plain connection refused", async () => {
+    stubFetch(async () => {
+      throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+    });
+
+    const probe = createProbe("https://guru.fritz.box");
+    const result = await probe("/health");
+
+    expect(result.status).toBe(0);
+    expect(result.tlsError).toBeUndefined();
+    expect(result.tlsHandshakeError).toBeUndefined();
+  });
+
+  it("flags tlsHandshakeError on an SNI/handshake rejection (not a cert-trust error)", async () => {
+    // A bare-IP connection to an SNI-strict reverse proxy aborts the TLS handshake.
+    stubFetch(async () => {
+      throw Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("tlsv1 alert internal error"), {
+          code: "ERR_SSL_TLSV1_ALERT_INTERNAL_ERROR",
+        }),
+      });
+    });
+
+    const probe = createProbe("https://192.168.188.102");
+    const result = await probe("/");
+
+    expect(result.status).toBe(0);
+    expect(result.tlsHandshakeError).toBe(true);
+    expect(result.tlsError).toBeUndefined();
+  });
+
+  it("flags nginx unrecognized_name as a handshake error and not a wrong-version HTTP listener", async () => {
+    stubFetch(async () => {
+      throw Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("unrecognized name"), {
+          code: "ERR_SSL_TLSV1_UNRECOGNIZED_NAME",
+        }),
+      });
+    });
+    const handshake = await createProbe("https://192.168.188.102")("/");
+    expect(handshake.tlsHandshakeError).toBe(true);
+
+    stubFetch(async () => {
+      throw Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("wrong version number"), {
+          code: "ERR_SSL_WRONG_VERSION_NUMBER",
+        }),
+      });
+    });
+    const httpOnTlsPort = await createProbe("https://192.168.188.102")("/");
+    expect(httpOnTlsPort.tlsHandshakeError).toBeUndefined();
+    expect(httpOnTlsPort.tlsError).toBeUndefined();
+  });
+
+  it("returns a 3xx when the caller asks not to follow redirects", async () => {
+    stubFetch(async (_input, init) => {
+      expect(init?.redirect).toBe("manual");
+      return makeFakeResponse(308, "");
+    });
+    const result = await createProbe("http://guru.fritz.box")("/", { redirect: "manual" });
+    expect(result.status).toBe(308);
+    expect(result.ok).toBe(false);
+  });
+
+  it("does NOT set tlsError when insecureTLS is enabled (verification is bypassed)", async () => {
+    // With insecureTLS the probe uses the node:http(s) path, not global fetch, so a cert
+    // error can no longer occur; a TLS failure must never be re-flagged in that mode.
+    stubFetch(async () => {
+      throw Object.assign(new TypeError("fetch failed"), {
+        cause: Object.assign(new Error("self-signed"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }),
+      });
+    });
+
+    // insecureTLS path does not call global fetch; point at a dead port so node:https refuses fast.
+    const probe = createProbe("https://127.0.0.1:9", { insecureTLS: true, defaultTimeoutMs: 500 });
+    const result = await probe("/health");
+
+    expect(result.status).toBe(0);
+    expect(result.tlsError).toBeUndefined();
+  });
 });

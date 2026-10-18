@@ -23,6 +23,11 @@ export interface ProbeInit {
   body?: string;
   /** Per-request timeout. Discovery uses a short budget (default supplied by the engine). */
   timeoutMs?: number;
+  /**
+   * `"manual"` returns a 3xx as-is. The default follows redirects, which hides an
+   * HTTP→HTTPS hop from manual add.
+   */
+  redirect?: "follow" | "manual";
 }
 
 export interface ProbeResult {
@@ -38,6 +43,21 @@ export interface ProbeResult {
   latencyMs?: number;
   /** Set when the request failed before a response (refused, DNS, timeout). */
   error?: string;
+  /**
+   * True when the request failed specifically because the server's TLS certificate
+   * could not be verified (self-signed / unknown issuer). Distinguishes "reachable but
+   * untrusted cert" from "nothing listening" (both otherwise surface as status:0), so
+   * the UI can offer an explicit "trust this certificate" opt-in instead of reporting
+   * the host as dead. See {@link ServerRecord.insecureTLS}.
+   */
+  tlsError?: boolean;
+  /**
+   * True when the TLS handshake was rejected at the protocol level (not a cert-trust issue) \u2014
+   * typically an SNI-strict reverse proxy aborting a bare-IP connection. The host is up but
+   * unreachable at this address; discovery can retry using the reverse-DNS hostname so the
+   * correct SNI is sent. TLS bypass alone does not fix this.
+   */
+  tlsHandshakeError?: boolean;
 }
 
 /**
@@ -72,6 +92,12 @@ export interface DiscoveredServer {
   label: string;
   /** Fingerprint confidence 0..1; the engine prefers the highest-confidence match per origin. */
   confidence: number;
+  /**
+   * True when this origin answered over HTTPS but its certificate could not be verified.
+   * The scan reports it as "found but untrusted" rather than dropping it; registering it
+   * requires the user to opt in, which sets {@link ServerRecord.insecureTLS}.
+   */
+  tlsError?: boolean;
 }
 
 export type HealthState = "healthy" | "loading" | "degraded" | "unauthorized" | "unreachable";
@@ -140,6 +166,13 @@ export interface ServerRecord {
   /** Unix ms. */
   addedAt: number;
   lastSeenAt?: number;
+  /**
+   * Opt-in: skip TLS certificate verification for this server (accept self-signed /
+   * non-publicly-trusted certs). Persisted per-server so a manually trusted HTTPS
+   * endpoint keeps working across reloads. Never enabled implicitly by a subnet scan —
+   * the user must explicitly trust the certificate. Default (absent) = verify normally.
+   */
+  insecureTLS?: boolean;
   /** Cached for offline rendering / fast startup; refreshed on health poll. */
   lastKnownModels?: ModelDescriptor[];
   /** Cached loaded-model ids for the "currently loaded" widget when introspection is unavailable. */

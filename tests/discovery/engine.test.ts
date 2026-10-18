@@ -5,7 +5,21 @@
  * The real Probe is NOT used; instead fake adapters inspect the `baseUrl` argument directly.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+
+// Keep unit tests off the network. Reverse/forward DNS is covered in reverse-dns-retry.test.ts.
+vi.mock("node:dns/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:dns/promises")>();
+  return {
+    ...actual,
+    reverse: vi.fn(async () => {
+      throw new Error("no PTR");
+    }),
+    lookup: vi.fn(async () => {
+      throw new Error("no forward");
+    }),
+  };
+});
 import {
   discoverLocalhost,
   discoverLan,
@@ -72,8 +86,99 @@ const okProbe: Probe = async (): Promise<ProbeResult> => ({
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe("DEFAULT_PROBE_PORTS", () => {
-  it("contains the seven canonical ports from CAPABILITY-MATRIX", () => {
-    expect(DEFAULT_PROBE_PORTS).toEqual([11434, 1234, 8080, 8000, 5000, 5001, 1337]);
+  it("contains the canonical backend ports plus the HTTPS ports", () => {
+    expect(DEFAULT_PROBE_PORTS).toEqual([11434, 1234, 8080, 8000, 5000, 5001, 1337, 443, 8443]);
+  });
+});
+
+describe("scheme selection", () => {
+  it("probes HTTPS ports over https:// and other ports over http://", async () => {
+    const probed = new Set<string>();
+    const adapter = makeAdapter("ollama", async (baseUrl) => {
+      probed.add(baseUrl);
+      return null;
+    });
+
+    await discoverLan([adapter], ["192.168.1.5"], { ports: [11434, 443, 8443] });
+
+    expect(probed.has("http://192.168.1.5:11434")).toBe(true);
+    expect(probed.has("https://192.168.1.5:443")).toBe(true);
+    expect(probed.has("https://192.168.1.5:8443")).toBe(true);
+  });
+});
+
+describe("untrusted TLS certificate", () => {
+  it("re-fingerprints an untrusted HTTPS origin and surfaces it (tlsError) only if an adapter matches", async () => {
+    // A verified probe reports a cert error; the insecure re-probe lets the adapter match.
+    // The adapter matches ONLY when it can actually read the body (insecure probe returns 200).
+    const adapter = makeAdapter("ollama", async (baseUrl, probe) => {
+      const r = await probe("/");
+      if (r.tlsError || r.status !== 200) return null; // verified probe: cert error -> no match
+      return {
+        kind: "ollama" as const,
+        baseUrl,
+        auth: "none" as const,
+        label: "Ollama",
+        confidence: 0.95,
+      };
+    });
+    // Verified probes report a cert error; the insecure re-probe returns 200. ProbeFactory
+    // cannot see the insecure flag, so the second probe built for this origin is the
+    // insecure pass (the first is the verified fingerprint; DNS is mocked to yield no PTR).
+    let built = 0;
+    const factory: ProbeFactory = () => {
+      const isInsecurePass = built++ >= 1;
+      return async (): Promise<ProbeResult> =>
+        isInsecurePass
+          ? { status: 200, ok: true, headers: {}, text: "{}", json: {} }
+          : { status: 0, ok: false, headers: {}, error: "cert", tlsError: true };
+    };
+
+    const results = await discoverLan([adapter], ["192.168.1.5"], {
+      ports: [443],
+      probeFactory: factory,
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.baseUrl).toBe("https://192.168.1.5:443");
+    expect(results[0]?.kind).toBe("ollama");
+    expect(results[0]?.tlsError).toBe(true);
+  });
+
+  it("DROPS an untrusted HTTPS origin that no adapter identifies (e.g. a router)", async () => {
+    // Never matches, even on the insecure re-probe -> it is not a backend, so it is dropped.
+    const adapter = makeAdapter("ollama", async () => null);
+    const factory: ProbeFactory = () => async (): Promise<ProbeResult> => ({
+      status: 0,
+      ok: false,
+      headers: {},
+      error: "cert",
+      tlsError: true,
+    });
+
+    const results = await discoverLan([adapter], ["192.168.1.5"], {
+      ports: [443],
+      probeFactory: factory,
+    });
+
+    expect(results).toHaveLength(0);
+  });
+
+  it("does NOT surface a placeholder for an http origin that merely refused", async () => {
+    const adapter = makeAdapter("ollama", async () => null);
+    const refusedFactory: ProbeFactory = () => async (): Promise<ProbeResult> => ({
+      status: 0,
+      ok: false,
+      headers: {},
+      error: "ECONNREFUSED",
+    });
+
+    const results = await discoverLan([adapter], ["192.168.1.5"], {
+      ports: [8080],
+      probeFactory: refusedFactory,
+    });
+
+    expect(results).toHaveLength(0);
   });
 });
 
