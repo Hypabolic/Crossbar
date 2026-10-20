@@ -165,6 +165,16 @@ describe("catalogueChanged", () => {
     expect(catalogueChanged(prev, next)).toBe(true);
   });
 
+  it("is true when the window provenance changes alone (the labelled cache must persist)", () => {
+    const prev = [model("a", { contextWindow: 4096, contextWindowSource: "observed" })];
+    const next = [model("a", { contextWindow: 4096, contextWindowSource: "declared" })];
+    expect(catalogueChanged(prev, next)).toBe(true);
+
+    const appeared = [model("a", { contextWindow: 4096, contextWindowSource: "observed" })];
+    const before = [model("a")];
+    expect(catalogueChanged(before, appeared)).toBe(true);
+  });
+
   it("is true when maxTokens changes for an existing model", () => {
     const prev = [model("a", { maxTokens: 1024 })];
     const next = [model("a", { maxTokens: 2048 })];

@@ -61,18 +61,26 @@ describe("lmstudio context window", () => {
     );
     const loaded = models.find((m) => m.id === "loaded-small-ctx");
     expect(loaded?.contextWindow).toBe(4096);
+    // The loaded (operative) window is a live observation.
+    expect(loaded?.contextWindowSource).toBe("observed");
+    // The model ceiling is informational, never the registered window.
+    expect(loaded?.trainedMax).toBe(131072);
     const entry = lmstudioAdapter.toPiModel(SERVER, loaded!);
     expect(entry.contextWindow).toBe(4096);
   });
 
-  it("falls back to the model ceiling when the model is not loaded", async () => {
+  it("reports no window for an unloaded model — the ceiling is informational only", async () => {
     const models = await lmstudioAdapter.listModels(
       SERVER,
       { mode: "none" },
       createFakeProbe({ "/api/v1/models": MODELS }),
     );
     const unloaded = models.find((m) => m.id === "unloaded");
-    expect(unloaded?.contextWindow).toBe(32768);
+    expect(unloaded).not.toHaveProperty("contextWindow");
+    expect(unloaded).not.toHaveProperty("contextWindowSource");
+    expect(unloaded?.trainedMax).toBe(32768);
+    // The Pi boundary gets the uniform fallback — never the 32768 ceiling.
+    expect(lmstudioAdapter.toPiModel(SERVER, unloaded!).contextWindow).toBe(8192);
   });
 });
 

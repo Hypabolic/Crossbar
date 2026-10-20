@@ -18,6 +18,7 @@
 
 import { Capability } from "../core/capability.ts";
 import type { BackendAdapter, PiApiType } from "../core/backend-adapter.ts";
+import { piContextWindow } from "../core/window-provenance.ts";
 import type {
   DiscoveredServer,
   HealthStatus,
@@ -85,7 +86,6 @@ interface OmlxModelsStatusResponse {
 // Constants
 // ---------------------------------------------------------------------------
 
-const DEFAULT_CONTEXT_WINDOW = 8192;
 const DEFAULT_MAX_TOKENS = 4096;
 
 /** Id / type tokens that indicate non-chat (embedding, reranker, helper) models. */
@@ -305,16 +305,27 @@ class OmlxAdapter implements BackendAdapter {
 
       const isEmbedding = isNonChatModel(listId, status);
 
+      // `max_model_len` is the server's runtime context cap (OBSERVED). When the card
+      // omits it, the window is UNKNOWN (no fabricated default); `toPiModel` applies
+      // the uniform boundary fallback.
       const desc: ModelDescriptor = {
         id: listId,
         name: listId,
-        contextWindow: typeof m.max_model_len === "number" ? m.max_model_len : DEFAULT_CONTEXT_WINDOW,
         maxTokens: DEFAULT_MAX_TOKENS,
         input: ["text"],
         reasoning: thinking === true,
         embeddings: isEmbedding,
         raw: m,
       };
+      if (
+        typeof m.max_model_len === "number" &&
+        Number.isSafeInteger(m.max_model_len) &&
+        m.max_model_len > 0
+      ) {
+        desc.contextWindow = m.max_model_len;
+        desc.contextWindowSource = "observed";
+        desc.contextWindowAt = Date.now();
+      }
       return desc;
     });
   }
@@ -485,7 +496,7 @@ class OmlxAdapter implements BackendAdapter {
       input: model.input.length > 0 ? model.input : ["text"],
       // Local inference is free → per-token costs are zero.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      contextWindow: piContextWindow(model),
       maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS,
       compat: { supportsUsageInStreaming: true },
     };

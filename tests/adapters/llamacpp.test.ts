@@ -68,6 +68,8 @@ describe("llama.cpp reported model limits", () => {
     );
 
     expect(model?.contextWindow).toBe(contextWindow);
+    // A pinned launch arg is the declared window — provenance must say so.
+    expect(model?.contextWindowSource).toBe("declared");
     expect(model?.maxTokens).toBe(maxTokens);
   });
 
@@ -164,7 +166,7 @@ describe("llama.cpp reported model limits", () => {
     expect(model?.contextWindow).toBe(32768);
   });
 
-  it("prefers the loaded runtime context and status prediction limit", async () => {
+  it("declared pin beats a conflicting loaded runtime context (precedence ladder)", async () => {
     const [model] = await listModels(
       [{
         id: "loaded-model",
@@ -179,7 +181,10 @@ describe("llama.cpp reported model limits", () => {
       },
     );
 
-    expect(model?.contextWindow).toBe(65536);
+    // A non-fitting pin would be a hard load failure, so in practice pin and loaded
+    // context agree — declared-first is the safe direction in the artificial conflict.
+    expect(model?.contextWindow).toBe(32768);
+    expect(model?.contextWindowSource).toBe("declared");
     expect(model?.maxTokens).toBe(4097);
   });
 
@@ -200,10 +205,12 @@ describe("llama.cpp reported model limits", () => {
     );
 
     expect(model?.contextWindow).toBe(24576);
+    // The single-server runtime default is a live observation.
+    expect(model?.contextWindowSource).toBe("observed");
     expect(model?.maxTokens).toBe(6144);
   });
 
-  it("ignores zero, non-integer, and unsafe candidates before valid fallbacks", async () => {
+  it("ignores zero, non-integer, and unsafe candidates — the trained ceiling is not a window", async () => {
     const [model] = await listModels(
       [{
         id: "fallthrough-model",
@@ -226,8 +233,50 @@ describe("llama.cpp reported model limits", () => {
       },
     );
 
-    expect(model?.contextWindow).toBe(65536);
+    // No declared or observed window exists — n_ctx_train 65536 is a trained
+    // ceiling: informational only, never a serviceable window.
+    expect(model).not.toHaveProperty("contextWindow");
+    expect(model).not.toHaveProperty("contextWindowSource");
+    expect(model?.trainedMax).toBe(65536);
     expect(model?.maxTokens).toBe(3072);
+  });
+
+  it("reports the trained ceiling as informational trainedMax alongside an observed window", async () => {
+    const [model] = await listModels(
+      [{
+        id: "qwen-incident",
+        meta: { n_ctx: 234496, n_ctx_train: 262144 },
+        status: null,
+      }],
+      {
+        default_generation_settings: { n_ctx: null },
+      },
+    );
+
+    expect(model?.contextWindow).toBe(234496);
+    expect(model?.contextWindowSource).toBe("observed");
+    expect(model?.trainedMax).toBe(262144);
+  });
+
+  it("reports no window for an unloaded router row whose only context is the trained ceiling (incident)", async () => {
+    const [model] = await listModels(
+      [{
+        id: "unsloth/Qwen3.8-27B-GGUF",
+        meta: { n_ctx: null, n_ctx_train: 262144 },
+        status: { args: [] },
+      }],
+      {
+        default_generation_settings: { n_ctx: 0 },
+      },
+    );
+
+    // The Qwen3.8-27B incident: unloaded, no -c pin, trained ceiling 262144.
+    // The descriptor must assert nothing — and the Pi entry gets the uniform
+    // boundary fallback, never the trained ceiling.
+    expect(model).not.toHaveProperty("contextWindow");
+    expect(model).not.toHaveProperty("contextWindowSource");
+    expect(model?.trainedMax).toBe(262144);
+    expect(llamacppAdapter.toPiModel(SERVER, model!).contextWindow).toBe(8192);
   });
 
   it("supports the legacy direct props n_predict shape", async () => {
@@ -357,7 +406,7 @@ describe("llama.cpp vision detection (/props modalities)", () => {
 });
 
 describe("llama.cpp Pi model limits", () => {
-  it("uses the Pi-boundary sentinels for absent or non-positive descriptor limits", () => {
+  it("uses the uniform 8192 boundary fallback for absent or non-positive descriptor limits", () => {
     const absent = llamacppAdapter.toPiModel(SERVER, {
       id: "absent",
       name: "absent",
@@ -371,9 +420,9 @@ describe("llama.cpp Pi model limits", () => {
       maxTokens: -1,
     });
 
-    expect(absent.contextWindow).toBe(128_000);
+    expect(absent.contextWindow).toBe(8192);
     expect(absent.maxTokens).toBe(0);
-    expect(nonPositive.contextWindow).toBe(128_000);
+    expect(nonPositive.contextWindow).toBe(8192);
     expect(nonPositive.maxTokens).toBe(0);
   });
 

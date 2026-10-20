@@ -8,6 +8,7 @@
 
 import { Capability } from "../core/capability.ts";
 import type { BackendAdapter, PiApiType } from "../core/backend-adapter.ts";
+import { piContextWindow } from "../core/window-provenance.ts";
 import type {
   DiscoveredServer,
   HealthStatus,
@@ -16,6 +17,7 @@ import type {
   PiModelEntry,
   Probe,
   ServerCredential,
+  WindowProvenance,
 } from "../core/types.ts";
 
 // ---------------------------------------------------------------------------
@@ -235,12 +237,30 @@ class LlamacppAdapter implements BackendAdapter {
         : isRouterRow
           ? false
           : rootVision;
-      const contextWindow = firstPositiveSafeInteger(
-        entry.meta?.n_ctx,
-        isRouterRow ? undefined : propsNCtx,
-        positiveIntegerArg(entry.status?.args, ["-c", "--ctx-size"]),
-        entry.meta?.n_ctx_train,
-      );
+
+      // Window provenance ladder (declared > observed):
+      //  1. `-c/--ctx-size` launch arg — the window the server was started with (a
+      //     non-fitting pin is a hard load failure), so it is the authoritative DECLARED window.
+      //  2. loaded runtime `meta.n_ctx` — the actual resident context: OBSERVED.
+      //  3. single-server root `/props` runtime default: OBSERVED (router rows carry no
+      //     per-model context there, so they are excluded).
+      // The trained ceiling (`meta.n_ctx_train`) is never a serviceable window — it is
+      // surfaced only as informational `trainedMax`.
+      const ctxArg = positiveIntegerArg(entry.status?.args, ["-c", "--ctx-size"]);
+      const loadedNCtx = positiveSafeInteger(entry.meta?.n_ctx);
+      let contextWindow: number | undefined;
+      let contextWindowSource: WindowProvenance | undefined;
+      if (ctxArg !== undefined) {
+        contextWindow = ctxArg;
+        contextWindowSource = "declared";
+      } else if (loadedNCtx !== undefined) {
+        contextWindow = loadedNCtx;
+        contextWindowSource = "observed";
+      } else if (!isRouterRow && propsNCtx !== undefined) {
+        contextWindow = propsNCtx;
+        contextWindowSource = "observed";
+      }
+
       const maxTokens = firstPositiveSafeInteger(
         positiveIntegerArg(entry.status?.args, ["-n", "--predict", "--n-predict"]),
         propsMaxTokens,
@@ -251,7 +271,13 @@ class LlamacppAdapter implements BackendAdapter {
         input: hasVision ? ["text", "image"] : ["text"],
         reasoning: false,
       };
-      if (contextWindow !== undefined) descriptor.contextWindow = contextWindow;
+      if (contextWindow !== undefined && contextWindowSource !== undefined) {
+        descriptor.contextWindow = contextWindow;
+        descriptor.contextWindowSource = contextWindowSource;
+        descriptor.contextWindowAt = Date.now();
+      }
+      const trainedMax = positiveSafeInteger(entry.meta?.n_ctx_train);
+      if (trainedMax !== undefined) descriptor.trainedMax = trainedMax;
       if (maxTokens !== undefined) descriptor.maxTokens = maxTokens;
       return descriptor;
     });
@@ -317,7 +343,7 @@ class LlamacppAdapter implements BackendAdapter {
       // .cached_tokens` to `Usage.cacheRead` and displays it regardless of cost. Keep
       // streaming usage reporting on so those prompt-cache hits are recorded.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: positiveSafeInteger(model.contextWindow) ?? 128_000,
+      contextWindow: piContextWindow(model),
       maxTokens: positiveSafeInteger(model.maxTokens) ?? 0,
       compat: { supportsUsageInStreaming: true },
     };

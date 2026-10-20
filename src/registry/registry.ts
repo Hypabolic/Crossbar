@@ -9,6 +9,7 @@
  */
 
 import type { CrossbarConfigFile, CrossbarSettings, HealthState, ModelDescriptor, ServerCredential, ServerRecord } from "../core/types.ts";
+import { MODEL_CACHE_VERSION } from "./persistence.ts";
 import type { CredentialStore } from "./persistence.ts";
 
 export interface RegistryDeps {
@@ -239,7 +240,7 @@ export class ServerRegistry {
   private async flush(): Promise<void> {
     const config: CrossbarConfigFile = {
       version: 1,
-      modelCacheVersion: 2,
+      modelCacheVersion: MODEL_CACHE_VERSION,
       servers: this.list(),
     };
     // Preserve discovery settings across every mutation — otherwise any server
