@@ -36,25 +36,25 @@ const minimalRecord: ServerRecord = {
 describe("loadConfig", () => {
   it("returns empty config when file does not exist", async () => {
     const config = await loadConfig({ dir });
-    expect(config).toEqual({ version: 1, modelCacheVersion: 2, servers: [] });
+    expect(config).toEqual({ version: 1, modelCacheVersion: 3, servers: [] });
   });
 
   it("returns empty config when file is not valid JSON", async () => {
     writeFileSync(join(dir, "crossbar.json"), "not json");
     const config = await loadConfig({ dir });
-    expect(config).toEqual({ version: 1, modelCacheVersion: 2, servers: [] });
+    expect(config).toEqual({ version: 1, modelCacheVersion: 3, servers: [] });
   });
 
   it("returns empty config when version is wrong", async () => {
     writeFileSync(join(dir, "crossbar.json"), JSON.stringify({ version: 2, servers: [] }));
     const config = await loadConfig({ dir });
-    expect(config).toEqual({ version: 1, modelCacheVersion: 2, servers: [] });
+    expect(config).toEqual({ version: 1, modelCacheVersion: 3, servers: [] });
   });
 
   it("round-trips a valid config", async () => {
     const original: CrossbarConfigFile = {
       version: 1,
-      modelCacheVersion: 2,
+      modelCacheVersion: 3,
       servers: [minimalRecord],
     };
     await saveConfig(original, { dir });
@@ -170,7 +170,7 @@ describe("loadConfig", () => {
 
     expect(loaded).toEqual({
       version: 1,
-      modelCacheVersion: 2,
+      modelCacheVersion: 3,
       settings,
       servers: [
         {
@@ -191,6 +191,7 @@ describe("loadConfig", () => {
               name: "Swap max fallback",
               input: ["text"],
               contextWindow: 32768,
+              contextWindowSource: "observed",
             },
           ],
         },
@@ -204,6 +205,7 @@ describe("loadConfig", () => {
               name: "Cpp authoritative context",
               input: ["text"],
               contextWindow: 8192,
+              contextWindowSource: "observed",
               maxTokens: 2048,
             },
             {
@@ -211,6 +213,7 @@ describe("loadConfig", () => {
               name: "Cpp max fallback",
               input: ["text"],
               contextWindow: 32768,
+              contextWindowSource: "observed",
             },
             {
               id: "cpp-invalid-context",
@@ -237,6 +240,7 @@ describe("loadConfig", () => {
               name: "Unsloth authoritative",
               input: ["text"],
               contextWindow: 262144,
+              contextWindowSource: "observed",
               maxTokens: 131072,
               loaded: true,
             },
@@ -251,6 +255,7 @@ describe("loadConfig", () => {
               name: "Ollama legitimate",
               input: ["text"],
               contextWindow: 8192,
+              contextWindowSource: "observed",
               maxTokens: 4096,
             },
           ],
@@ -262,7 +267,7 @@ describe("loadConfig", () => {
   it("trusts current-marker model caches without re-migrating legitimate fallback-shaped values", async () => {
     const marked: CrossbarConfigFile = {
       version: 1,
-      modelCacheVersion: 2,
+      modelCacheVersion: 3,
       servers: [
         {
           ...minimalRecord,
@@ -310,7 +315,7 @@ describe("saveConfig", () => {
     const text = readFileSync(join(dir, "crossbar.json"), "utf-8");
     // Pretty JSON has newlines
     expect(text).toContain("\n");
-    expect(JSON.parse(text)).toMatchObject({ version: 1, modelCacheVersion: 2 });
+    expect(JSON.parse(text)).toMatchObject({ version: 1, modelCacheVersion: 3 });
   });
 
   it("strips apiKey fields from server records", async () => {
@@ -341,7 +346,7 @@ describe("saveConfig", () => {
     const nested = join(dir, "nested", "deep");
     await saveConfig({ version: 1, servers: [] }, { dir: nested });
     const loaded = await loadConfig({ dir: nested });
-    expect(loaded).toEqual({ version: 1, modelCacheVersion: 2, servers: [] });
+    expect(loaded).toEqual({ version: 1, modelCacheVersion: 3, servers: [] });
   });
 });
 

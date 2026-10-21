@@ -112,11 +112,37 @@ export interface HealthStatus {
 // Models & loaded state
 // ---------------------------------------------------------------------------------------------------
 
+/**
+ * Provenance of a reported context window:
+ *  - `declared`: the backend states the window as configuration — a pinned launch
+ *    arg (`-c/--ctx-size`), a model-file or catalogue-declared context, or a
+ *    provider's per-model table.
+ *  - `observed`: the backend reported the window as live runtime state (loaded
+ *    `n_ctx`, a runtime `/props` default, `max_model_len`, a loaded-state report).
+ *
+ * A trained/architectural ceiling is NEITHER — it never becomes `contextWindow`;
+ * it surfaces only as the informational `ModelDescriptor.trainedMax`.
+ */
+export type WindowProvenance = "declared" | "observed";
+
 export interface ModelDescriptor {
   id: string;
   name: string;
-  /** Context window in tokens, when the backend reports it. */
+  /**
+   * Context window in tokens, when the backend reports it. MUST be paired with
+   * `contextWindowSource` — an unlabelled number is a contract violation, enforced
+   * by the conformance suite.
+   */
   contextWindow?: number;
+  /** Provenance of `contextWindow`; set iff `contextWindow` is set. */
+  contextWindowSource?: WindowProvenance;
+  /** Unix ms when `contextWindow` was reported; set iff `contextWindow` is set. */
+  contextWindowAt?: number;
+  /**
+   * Informational only: the model's trained/architectural context ceiling, when the
+   * backend reports one. Never becomes `contextWindow` and is never registered with Pi.
+   */
+  trainedMax?: number;
   /** Max output tokens, when known. */
   maxTokens?: number;
   /** Input modalities. Defaults to ["text"] when the backend doesn't say. */
@@ -212,9 +238,11 @@ export interface CrossbarConfigFile {
    * Version of the cached model-capability data. Missing or unknown values are migrated on
    * load. Bumped to 2 when the Unsloth Studio adapter stopped fabricating an 8192/4096
    * context for models the server reports no context for, so already-written caches carrying
-   * those invented values get re-sanitized once.
+   * those invented values get re-sanitized once. Bumped to 3 for the window-provenance
+   * contract: cached entries gain `contextWindowSource`/`contextWindowAt` and
+   * every bare legacy `contextWindow` is re-stamped `observed` (values unchanged).
    */
-  modelCacheVersion?: 1 | 2;
+  modelCacheVersion?: 1 | 2 | 3;
   servers: ServerRecord[];
   settings?: CrossbarSettings;
 }

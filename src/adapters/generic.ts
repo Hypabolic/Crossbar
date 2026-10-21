@@ -15,6 +15,7 @@
 
 import { Capability } from "../core/capability.ts";
 import type { BackendAdapter, PiApiType } from "../core/backend-adapter.ts";
+import { piContextWindow, UNKNOWN_CONTEXT_WINDOW } from "../core/window-provenance.ts";
 import type {
   DiscoveredServer,
   ModelDescriptor,
@@ -27,7 +28,6 @@ import type {
 // Conservative defaults — applied when the backend doesn't report metadata
 // ---------------------------------------------------------------------------
 
-const DEFAULT_CONTEXT_WINDOW = 8192;
 const DEFAULT_MAX_TOKENS = 4096;
 
 // ---------------------------------------------------------------------------
@@ -91,7 +91,11 @@ class GenericAdapter implements BackendAdapter {
 
   /**
    * GET /v1/models → map data[].id to ModelDescriptor.
-   * Conservative defaults are applied (contextWindow 8192, maxTokens = half of contextWindow, input ["text"]).
+   * Window provenance: a context field the server itself reports (`context_window`,
+   * `max_model_len`, `context_length`, `max_context_length`) is an OBSERVED window;
+   * when the server reports none, the window stays UNKNOWN — no fabricated default in
+   * the descriptor — and `toPiModel` applies the uniform boundary fallback. maxTokens
+   * keeps its derived value (half of the reported window, or of the boundary value).
    * Common embedding/reranking model families are excluded from chat registration.
    * Throws on non-ok / 401 / status:0.
    */
@@ -150,24 +154,27 @@ class GenericAdapter implements BackendAdapter {
                   : typeof item.max_context_window === "number" && item.max_context_window > 0
                     ? item.max_context_window
                     : undefined;
-        
-        const finalContextWindow = contextWindow ?? DEFAULT_CONTEXT_WINDOW;
-        
+
         const maxTokens =
           typeof item.max_completion_tokens === "number" && item.max_completion_tokens > 0
             ? item.max_completion_tokens
-            : Math.floor(finalContextWindow / 2);
-        
-        return {
+            : Math.floor((contextWindow ?? UNKNOWN_CONTEXT_WINDOW) / 2);
+
+        const descriptor: ModelDescriptor = {
           id: item.id,
           name: item.id,
-          contextWindow: finalContextWindow,
           maxTokens,
           input: ["text"],
           reasoning: false,
           embeddings: isEmbedding,
           raw: item,
         };
+        if (contextWindow !== undefined) {
+          descriptor.contextWindow = contextWindow;
+          descriptor.contextWindowSource = "observed";
+          descriptor.contextWindowAt = Date.now();
+        }
+        return descriptor;
       });
   }
 
@@ -185,7 +192,7 @@ class GenericAdapter implements BackendAdapter {
       // flag only asks for usage in streaming (never fabricates), so it is safe even for
       // unknown OpenAI-compatible servers that may not report cache hits.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      contextWindow: piContextWindow(model),
       maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS,
       compat: { supportsUsageInStreaming: true },
     };

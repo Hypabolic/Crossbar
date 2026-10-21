@@ -18,6 +18,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import type { DiscoveredServer, ModelDescriptor, ServerRecord } from "./core/index.ts";
+import { mergeCatalogue } from "./core/window-provenance.ts";
 import { adapterFor, DISCOVERY_ADAPTERS } from "./adapters/index.ts";
 import { discoverLan, discoverLocalhost } from "./discovery/engine.ts";
 import { expandHosts, localSubnetCidrs } from "./discovery/subnet.ts";
@@ -150,13 +151,17 @@ export default async function crossbar(pi: ExtensionAPI): Promise<void> {
     try {
       const probe = createProbe(record.baseUrl, { auth: cred, insecureTLS: record.insecureTLS });
       const liveModels = await adapter.listModels(recordToServer(record), cred, probe);
+      // precedence ladder: live evidence (declared or observed) beats the
+      // persisted cache; the persisted (value, source) fills models the live list
+      // reports no window for (e.g. an unloaded router row).
+      const merged = mergeCatalogue(record.lastKnownModels, liveModels);
       // Persist only when the catalogue changed in a registration-relevant way.
-      if (catalogueChanged(record.lastKnownModels, liveModels)) {
-        await reg.setLastKnownModels(record.id, liveModels);
+      if (catalogueChanged(record.lastKnownModels, merged)) {
+        await reg.setLastKnownModels(record.id, merged);
       }
       // Always update lastSeenAt ephemerally (no persist).
       reg.updateHealthCache(record.id, { lastSeenAt: Date.now() });
-      models = liveModels;
+      models = merged;
     } catch {
       // Offline / unreachable — fall back to last-known models (may be empty).
     }

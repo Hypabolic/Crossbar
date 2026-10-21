@@ -80,6 +80,7 @@
 
 import { Capability } from "../core/capability.ts";
 import type { BackendAdapter, PiApiType } from "../core/backend-adapter.ts";
+import { piContextWindow } from "../core/window-provenance.ts";
 import type {
   DiscoveredServer,
   LoadedState,
@@ -150,12 +151,8 @@ const DEFAULT_PORT = 8888;
  */
 const AUTO_SWITCH_SETTINGS_PATH = "/api/settings/openai-auto-switch";
 
-/**
- * Fallback context used ONLY at the Pi-mapping boundary, where the field is mandatory and a
- * model with no known context would otherwise be unusable. Matches the llama.cpp/llama-swap
- * adapters. `maxTokens: 0` means "no client-side cap — let the server decide".
- */
-const FALLBACK_CONTEXT_WINDOW = 128_000;
+/** `maxTokens: 0` means "no client-side cap — let the server decide".
+ * The context fallback at the Pi boundary is the shared `UNKNOWN_CONTEXT_WINDOW` (8192). */
 const FALLBACK_MAX_TOKENS = 0;
 
 /** Loaded-backend status endpoint (thinking metadata; see the file header, issue #37). */
@@ -181,24 +178,20 @@ function positiveSafeInteger(value: unknown): number | undefined {
 }
 
 /**
- * Prefer the model's currently-configured context (only present while loaded), then the
- * usable ceiling, then the architectural native max.
+ * The only serviceable window is the currently-configured context (`context_length`,
+ * present while loaded) — OBSERVED. The usable ceiling (`max_context_length`) and the
+ * trained architectural ceiling (`native_context_length`) are NOT serviceable windows:
+ * the trained value surfaces as informational `trainedMax`, the usable ceiling
+ * has no v1 field.
  *
- * Returns `undefined` — NOT a fabricated default — when the server reports none of them.
- * Verified against a live instance: Unsloth Studio emits the three `*context_length` fields
- * ONLY for models that are currently loaded; every unloaded entry carries no context
- * information at all. Inventing a number here (this used to return 8192) baked a bogus
- * "8k ctx" into both the model picker and the `lastKnownModels` cache in crossbar.json for
- * every unloaded model — including 262144-context ones. Same rule as the llama.cpp and
- * llama-swap adapters: report only what the backend actually said, and let `toPiModel`
- * apply the single, clearly-marked fallback.
+ * Returns `undefined` — NOT a fabricated default — when the server reports no configured
+ * context. Verified against a live instance: Unsloth Studio emits the `*context_length`
+ * fields ONLY for models that are currently loaded; every unloaded entry carries no
+ * context information at all. Report only what the backend actually said, and let
+ * `toPiModel` apply the single, clearly-marked fallback.
  */
 function contextWindowFor(entry: UnslothModelEntry): number | undefined {
-  return (
-    positiveSafeInteger(entry.context_length) ??
-    positiveSafeInteger(entry.max_context_length) ??
-    positiveSafeInteger(entry.native_context_length)
-  );
+  return positiveSafeInteger(entry.context_length);
 }
 
 /**
@@ -344,7 +337,13 @@ class UnslothAdapter implements BackendAdapter {
       };
       // Omitted entirely when unknown, so the cached descriptor never asserts a context
       // the server did not report — and picks up the real value once the model is loaded.
-      if (contextWindow !== undefined) descriptor.contextWindow = contextWindow;
+      if (contextWindow !== undefined) {
+        descriptor.contextWindow = contextWindow;
+        descriptor.contextWindowSource = "observed";
+        descriptor.contextWindowAt = Date.now();
+      }
+      const trainedMax = positiveSafeInteger(entry.native_context_length);
+      if (trainedMax !== undefined) descriptor.trainedMax = trainedMax;
       return descriptor;
     });
   }
@@ -407,7 +406,7 @@ class UnslothAdapter implements BackendAdapter {
       // Local inference is free — cost is zero — but cache-hit token COUNTS still matter, so
       // streaming usage stays enabled (never fabricated) in case llama-server reports them.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: positiveSafeInteger(model.contextWindow) ?? FALLBACK_CONTEXT_WINDOW,
+      contextWindow: piContextWindow(model),
       maxTokens: positiveSafeInteger(model.maxTokens) ?? FALLBACK_MAX_TOKENS,
       compat: { supportsUsageInStreaming: true },
     };

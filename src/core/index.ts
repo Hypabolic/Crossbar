@@ -18,6 +18,15 @@ export {
   type PiApiType,
 } from "./backend-adapter.ts";
 
+export {
+  UNKNOWN_CONTEXT_WINDOW,
+  hasProvenancedWindow,
+  mergeCatalogue,
+  piContextWindow,
+} from "./window-provenance.ts";
+
+export type { WindowProvenance } from "./types.ts";
+
 export type {
   CrossbarConfigFile,
   CrossbarSettings,

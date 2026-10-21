@@ -24,6 +24,7 @@ import type {
   ServerCredential,
 } from "../../src/core/types.ts";
 import type { AdapterFixture } from "./fixtures.ts";
+import { piContextWindow } from "../../src/core/window-provenance.ts";
 import { REFUSED, UNAUTHORIZED, sequence, auth401 } from "./fake-probe.ts";
 
 // ---------------------------------------------------------------------------
@@ -32,12 +33,14 @@ import { REFUSED, UNAUTHORIZED, sequence, auth401 } from "./fake-probe.ts";
 
 const BASE_URL = "http://127.0.0.1:19999";
 
-/** A well-known model set returned by the reference fixture. */
+/** A well-known model set returned by the reference fixture (provenance-paired per contract v5). */
 const REFERENCE_MODELS: ModelDescriptor[] = [
   {
     id: "ref-chat-a",
     name: "Reference Chat A",
     contextWindow: 8192,
+    contextWindowSource: "declared",
+    contextWindowAt: 1_700_000_000_000,
     maxTokens: 4096,
     input: ["text"],
     reasoning: false,
@@ -48,6 +51,8 @@ const REFERENCE_MODELS: ModelDescriptor[] = [
     id: "ref-chat-b",
     name: "Reference Chat B",
     contextWindow: 32768,
+    contextWindowSource: "observed",
+    contextWindowAt: 1_700_000_000_000,
     maxTokens: 8192,
     input: ["text", "image"],
     reasoning: true,
@@ -58,6 +63,8 @@ const REFERENCE_MODELS: ModelDescriptor[] = [
     id: "ref-embed-1",
     name: "Reference Embeddings 1",
     contextWindow: 512,
+    contextWindowSource: "declared",
+    contextWindowAt: 1_700_000_000_000,
     maxTokens: 512,
     input: ["text"],
     embeddings: true, // must be filtered out of chat list
@@ -227,7 +234,7 @@ class ReferenceAdapter implements BackendAdapter {
       reasoning: model.reasoning ?? false,
       input: model.input.length > 0 ? model.input : ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: model.contextWindow ?? 4096,
+      contextWindow: piContextWindow(model),
       maxTokens: model.maxTokens ?? 2048,
     };
   }

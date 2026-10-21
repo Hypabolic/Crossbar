@@ -43,6 +43,29 @@ describe("generic embedding-model detection", () => {
       .toEqual(ids.slice(0, 5));
     expect(models.find((model) => model.id === "chat-model")?.embeddings).toBe(false);
   });
+
+  it("labels server-reported context fields as observed and reports none when absent", async () => {
+    const probe: Probe = async () => ({
+      status: 200,
+      ok: true,
+      headers: {},
+      json: { data: [{ id: "ctx-model", context_window: 32_000 }, { id: "bare-model" }] },
+    });
+    const server: DiscoveredServer = {
+      kind: "openai-generic",
+      baseUrl: "http://localhost:8080",
+      auth: "none",
+      label: "Generic",
+      confidence: 1,
+    };
+    const models = await genericAdapter.listModels(server, { mode: "none" }, probe);
+    expect(models.find((m) => m.id === "ctx-model")?.contextWindow).toBe(32_000);
+    expect(models.find((m) => m.id === "ctx-model")?.contextWindowSource).toBe("observed");
+    expect(models.find((m) => m.id === "bare-model")).not.toHaveProperty("contextWindow");
+    // maxTokens keeps its derived value (half of the reported window, else the boundary).
+    expect(models.find((m) => m.id === "ctx-model")?.maxTokens).toBe(16_000);
+    expect(models.find((m) => m.id === "bare-model")?.maxTokens).toBe(4096);
+  });
 });
 
 const SERVER: DiscoveredServer = {
@@ -92,7 +115,7 @@ describe("generic context window detection", () => {
     expect(model?.contextWindow).toBe(expected);
   });
 
-  it("ignores a non-positive max_context_window and keeps the default", async () => {
+  it("ignores a non-positive max_context_window — no fabricated window; uniform fallback at the Pi boundary", async () => {
     const probe = modelsProbe([
       { id: "zero", max_context_window: 0 },
       { id: "negative", max_context_window: -1 },
@@ -101,6 +124,9 @@ describe("generic context window detection", () => {
 
     const models = await genericAdapter.listModels(SERVER, { mode: "none" }, probe);
 
-    expect(models.map((model) => model.contextWindow)).toEqual([8192, 8192, 8192]);
+    for (const model of models) {
+      expect(model).not.toHaveProperty("contextWindow");
+      expect(genericAdapter.toPiModel(SERVER, model).contextWindow).toBe(8192);
+    }
   });
 });

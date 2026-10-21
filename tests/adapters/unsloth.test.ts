@@ -162,9 +162,13 @@ describe("[unsloth] adapter-specific", () => {
         ]),
       );
       expect(models[0]?.contextWindow).toBe(262144);
+      // The currently-configured context is a live observation; the trained
+      // architectural ceiling is surfaced separately as informational data.
+      expect(models[0]?.contextWindowSource).toBe("observed");
+      expect(models[0]?.trainedMax).toBe(262144);
     });
 
-    it("falls back to max/native context when the configured one is absent or zero", async () => {
+    it("keeps ceilings out of the window: usable and trained maxima are informational only", async () => {
       const models = await unslothAdapter.listModels(
         server,
         cred,
@@ -173,17 +177,20 @@ describe("[unsloth] adapter-specific", () => {
           { id: "native-only", owned_by: "unsloth-studio", context_length: 0, native_context_length: 262144 },
         ]),
       );
-      expect(models[0]?.contextWindow).toBe(229888);
-      expect(models[1]?.contextWindow).toBe(262144);
+      // A usable ceiling (no configured context) is not a serviceable window.
+      expect(models[0]).not.toHaveProperty("contextWindow");
+      // The trained ceiling is never a window — only informational trainedMax.
+      expect(models[1]).not.toHaveProperty("contextWindow");
+      expect(models[1]?.trainedMax).toBe(262144);
     });
 
-    it("maps an unknown context to Pi's 128k fallback and unbounded maxTokens, never 8192", () => {
+    it("maps an unknown context to the uniform 8192 fallback and unbounded maxTokens", () => {
       const entry = unslothAdapter.toPiModel(server, {
         id: "unloaded",
         name: "unloaded",
         input: ["text"],
       });
-      expect(entry.contextWindow).toBe(128_000);
+      expect(entry.contextWindow).toBe(8192);
       expect(entry.maxTokens).toBe(0);
     });
 
