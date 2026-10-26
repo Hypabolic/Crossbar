@@ -11,6 +11,7 @@
 
 import { Capability } from "../core/capability.ts";
 import type { BackendAdapter, PiApiType } from "../core/backend-adapter.ts";
+import { piContextWindow } from "../core/window-provenance.ts";
 import type {
   DiscoveredServer,
   HealthStatus,
@@ -258,6 +259,10 @@ class LlamaswapAdapter implements BackendAdapter {
     const body = r.json as V1ModelsBody | undefined;
     const data = body?.data ?? [];
     return data.map((entry) => {
+      // The proxy's per-model `context_length` is its catalogue's declared context for
+      // that upstream (DECLARED) — the window llama-swap commits to serving, unlike a
+      // raw model file's trained ceiling. extractContextLength reads the top-level field,
+      // else the nested meta.llamaswap.context_length echoed from config.yaml.
       const contextWindow = extractContextLength(entry);
       const descriptor: ModelDescriptor = {
         id: entry.id,
@@ -266,7 +271,11 @@ class LlamaswapAdapter implements BackendAdapter {
         reasoning: false,
       };
 
-      if (contextWindow !== undefined) descriptor.contextWindow = contextWindow;
+      if (contextWindow !== undefined) {
+        descriptor.contextWindow = contextWindow;
+        descriptor.contextWindowSource = "declared";
+        descriptor.contextWindowAt = Date.now();
+      }
       if (modelSupportsTools(entry.capabilities, entry.supported_parameters)) {
         descriptor.tools = true;
       }
@@ -370,12 +379,7 @@ class LlamaswapAdapter implements BackendAdapter {
       // .cached_tokens` to `Usage.cacheRead` and displays it regardless of cost. Keep
       // streaming usage reporting on so those prompt-cache hits are recorded.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow:
-        model.contextWindow !== undefined &&
-        Number.isSafeInteger(model.contextWindow) &&
-        model.contextWindow > 0
-          ? model.contextWindow
-          : 128_000,
+      contextWindow: piContextWindow(model),
       maxTokens:
         model.maxTokens !== undefined &&
         Number.isSafeInteger(model.maxTokens) &&

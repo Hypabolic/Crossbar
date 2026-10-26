@@ -51,6 +51,8 @@ describe("llamaswap model limits", () => {
 
     expect(models).toHaveLength(1);
     expect(models[0]?.contextWindow).toBe(32_768);
+    // The proxy's per-model catalogue entry is a declared context.
+    expect(models[0]?.contextWindowSource).toBe("declared");
     expect(models[0]).not.toHaveProperty("maxTokens");
     expect(paths).toEqual(["/v1/models"]);
   });
@@ -164,7 +166,7 @@ describe("llamaswap model limits", () => {
 
     for (const model of models) {
       expect(model).not.toHaveProperty("contextWindow");
-      expect(llamaswapAdapter.toPiModel(SERVER, model).contextWindow).toBe(128_000);
+      expect(llamaswapAdapter.toPiModel(SERVER, model).contextWindow).toBe(8192);
     }
   });
 });
@@ -197,6 +199,7 @@ describe("llamaswap typed model metadata", () => {
     expect(model?.loaded).toBe(true);
     expect(model?.reasoning).toBe(false);
     expect(model?.contextWindow).toBe(65_536);
+    expect(model?.contextWindowSource).toBe("declared");
     expect(paths).toEqual(["/v1/models"]);
   });
 
@@ -523,18 +526,18 @@ describe("llamaswap typed model metadata", () => {
 });
 
 describe("llamaswap Pi model limits", () => {
-  it("uses only the 128000/0 registration fallback when limits are missing", () => {
+  it("uses only the uniform 8192/0 registration fallback when limits are missing", () => {
     const piModel = llamaswapAdapter.toPiModel(SERVER, {
       id: "unknown-limits",
       name: "unknown-limits",
       input: ["text"],
     });
 
-    expect(piModel.contextWindow).toBe(128_000);
+    expect(piModel.contextWindow).toBe(8192);
     expect(piModel.maxTokens).toBe(0);
   });
 
-  it("uses the registration fallback for non-positive limits", () => {
+  it("uses the uniform registration fallback for non-positive limits", () => {
     const piModel = llamaswapAdapter.toPiModel(SERVER, {
       id: "non-positive-limits",
       name: "non-positive-limits",
@@ -543,7 +546,7 @@ describe("llamaswap Pi model limits", () => {
       maxTokens: -1,
     });
 
-    expect(piModel.contextWindow).toBe(128_000);
+    expect(piModel.contextWindow).toBe(8192);
     expect(piModel.maxTokens).toBe(0);
   });
 

@@ -83,14 +83,17 @@ describe("oMLX max_model_len → contextWindow", () => {
     expect(models.at(0)!.contextWindow).toBe(REPORTED_MAX_MODEL_LEN);
   });
 
-  it("generic adapter: contextWindow defaults to 8192 when no max_model_len", async () => {
+  it("generic adapter: reports no window when the server reports none (no fabricated default)", async () => {
     const models = await genericAdapter.listModels(
       genericServer,
       { mode: "none" },
       makeGenericProbe(),
     );
     expect(models.length).toBeGreaterThan(0);
-    expect(models.at(0)!.contextWindow).toBe(8192);
+    expect(models.at(0)).not.toHaveProperty("contextWindow");
+    expect(models.at(0)).not.toHaveProperty("contextWindowSource");
+    // The uniform boundary fallback still applies at the Pi boundary.
+    expect(genericAdapter.toPiModel(genericServer, models.at(0)!).contextWindow).toBe(8192);
   });
 });
 

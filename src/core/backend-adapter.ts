@@ -35,8 +35,13 @@ import type {
  * v4: added optional `autoLoadsOnDemand` + `Capability.AutoLoadStatus` (non-breaking —
  * existing adapters are unaffected; only backends that can answer authoritatively,
  * e.g. Unsloth Studio's "Switch model by request" setting, implement it).
+ * v5: window provenance (non-breaking — all new fields are optional): `listModels` must
+ * report `contextWindow` paired with `contextWindowSource` ("declared"|"observed") and
+ * `contextWindowAt`, must never promote a trained ceiling to `contextWindow` (it goes to
+ * the informational `trainedMax`), and `toPiModel` emits `UNKNOWN_CONTEXT_WINDOW` (8192)
+ * for unknown windows instead of per-adapter fallbacks. See `window-provenance.ts`.
  */
-export const CONTRACT_VERSION = 4 as const;
+export const CONTRACT_VERSION = 5 as const;
 
 /** Which built-in Pi API type the adapter registers its models under. */
 export type PiApiType = "openai-completions" | "anthropic-messages";
@@ -119,7 +124,9 @@ export interface BackendAdapter {
 
   /**
    * Map one discovered model to the exact entry Pi's `registerProvider` expects. Owns api/compat-flag
-   * selection, cost zeros for local backends, and conservative defaults when caps are unknown.
+   * selection, cost zeros for local backends, and the uniform `UNKNOWN_CONTEXT_WINDOW` fallback
+   * when the descriptor carries no (provenanced) context window — the only place a window-less
+   * model gets a number, and always the same safe one.
    */
   toPiModel(server: DiscoveredServer, model: ModelDescriptor): PiModelEntry;
 

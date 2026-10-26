@@ -45,7 +45,8 @@ export function modelsChanged(
  *
  * Returns true when:
  *   - the id SET differs (delegates to modelsChanged), OR
- *   - for any id present in both: name, contextWindow, maxTokens, input
+ *   - for any id present in both: name, contextWindow, contextWindowSource
+ *     (provenance-only changes persist the labelled cache), maxTokens, input
  *     (as a sorted set), reasoning, tools, or embeddings changed.
  *
  * Order of models in the list does not matter — only content changes do.
@@ -65,6 +66,7 @@ export function catalogueChanged(
     if (!p) continue; // shouldn't happen after modelsChanged check, but be safe
     if (p.name !== n.name) return true;
     if (p.contextWindow !== n.contextWindow) return true;
+    if (p.contextWindowSource !== n.contextWindowSource) return true;
     if (p.maxTokens !== n.maxTokens) return true;
     // Compare input modalities as sorted sets.
     const pi = [...p.input].sort().join(",");

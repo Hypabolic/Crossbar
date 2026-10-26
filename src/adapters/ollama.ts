@@ -15,6 +15,7 @@
 
 import { Capability } from "../core/capability.ts";
 import type { BackendAdapter, PiApiType } from "../core/backend-adapter.ts";
+import { piContextWindow } from "../core/window-provenance.ts";
 import type {
   DiscoveredServer,
   HealthStatus,
@@ -64,7 +65,6 @@ interface OllamaPsResponse {
 // Constants
 // ---------------------------------------------------------------------------
 
-const DEFAULT_CONTEXT_WINDOW = 8192;
 const DEFAULT_MAX_TOKENS = 4096;
 
 // ---------------------------------------------------------------------------
@@ -155,12 +155,20 @@ class OllamaAdapter implements BackendAdapter {
     return descriptors;
   }
 
-  /** Fetch /api/show for a single model and build its ModelDescriptor. */
+  /**
+   * Fetch /api/show for a single model and build its ModelDescriptor.
+   *
+   * Window provenance: Ollama's `model_info` `*.context_length` key is the model
+   * FILE's trained context (GGUF metadata) — a trained ceiling, not the context the
+   * server actually serves (the runtime `num_ctx` default is smaller and per-request).
+   * It is surfaced only as informational `trainedMax`; Ollama exposes
+   * no runtime context report, so the serviceable window stays unknown and `toPiModel`
+   * applies the uniform boundary fallback.
+   */
   private async _fetchModelCaps(modelId: string, probe: Probe): Promise<ModelDescriptor> {
     const defaults: ModelDescriptor = {
       id: modelId,
       name: modelId,
-      contextWindow: DEFAULT_CONTEXT_WINDOW,
       maxTokens: DEFAULT_MAX_TOKENS,
       input: ["text"],
       reasoning: false,
@@ -185,21 +193,20 @@ class OllamaAdapter implements BackendAdapter {
       const hasThinking = caps.includes("thinking");
       const isEmbedding = caps.includes("embedding");
 
-      // Extract context length from model_info: look for any key ending in ".context_length"
-      let contextWindow = DEFAULT_CONTEXT_WINDOW;
+      // Extract the trained context from model_info: any key ending in ".context_length".
+      let trainedMax: number | undefined;
       if (show.model_info) {
         for (const [key, val] of Object.entries(show.model_info)) {
           if (key.endsWith(".context_length") && typeof val === "number" && val > 0) {
-            contextWindow = val;
+            trainedMax = val;
             break;
           }
         }
       }
 
-      return {
+      const descriptor: ModelDescriptor = {
         id: modelId,
         name: modelId,
-        contextWindow,
         maxTokens: DEFAULT_MAX_TOKENS,
         input: hasVision ? ["text", "image"] : ["text"],
         reasoning: hasThinking,
@@ -207,6 +214,8 @@ class OllamaAdapter implements BackendAdapter {
         embeddings: isEmbedding,
         raw: show,
       };
+      if (trainedMax !== undefined) descriptor.trainedMax = trainedMax;
+      return descriptor;
     } catch {
       // /api/show might not exist or might error — fall back to defaults
       return defaults;
@@ -325,7 +334,7 @@ class OllamaAdapter implements BackendAdapter {
       // .cached_tokens` to `Usage.cacheRead` and displays it regardless of cost. Keep
       // streaming usage reporting on so those prompt-cache hits are recorded.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      contextWindow: piContextWindow(model),
       maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS,
       compat: { supportsUsageInStreaming: true },
     };

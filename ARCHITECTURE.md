@@ -65,12 +65,19 @@ each one:
    shape → ~0.3). Cloud adapters return `null`.
 4. **`listModels` filters embeddings** out of chat registration (keeps them only if flagged).
 5. **`toPiModel` owns Pi mapping.** Sets `api`, `compat` quirk flags, `cost` zeros for local, and
-   conservative defaults: `contextWindow` from backend or a safe fallback, `input` defaults `["text"]`.
+   the uniform `UNKNOWN_CONTEXT_WINDOW` (8192) fallback when the descriptor carries no window —
+   never a per-adapter number, `input` defaults `["text"]`.
 6. **`switchModel` confirms or throws.** Must surface server-down-mid-switch and model-not-available as
    rejections, not silent success.
 7. **No secret leakage.** Adapters receive `ServerCredential` but must never log/serialize `apiKey`.
+8. **Window provenance.** `listModels` reports `contextWindow` paired with
+   `contextWindowSource` ("declared" | "observed") and `contextWindowAt` — never an unlabelled
+   number. Declared = pinned launch arg / model-file or catalogue context / provider tables;
+   observed = live runtime reports. A trained ceiling never becomes `contextWindow`; it surfaces
+   only as the informational `trainedMax`. Unknown stays unknown in the descriptor — the only
+   place a number is filled is the Pi boundary, and always the same 8192.
 
-`CONTRACT_VERSION = 4`. Any breaking change bumps it; registry asserts adapters match.
+`CONTRACT_VERSION = 5`. Any breaking change bumps it; registry asserts adapters match.
 
 ## 3. Provider-registration shim (`shim/provider-shim.ts`)
 
@@ -117,8 +124,15 @@ register(record):
   Pi resolves any models) to register enabled servers that have a `lastKnownModels` cache using the
   pure `buildProviderConfig` path (`registerCachedServer`). No network, no UI, no timers, never throws.
   `session_start` then builds the live `ServerRegistry`, does refresh + auto-discovery + widget + poll.
-  `catalogueChanged` + `setLastKnownModels` (which calls flush) ensure registration-relevant catalogue
-  updates are durable; `updateHealthCache` remains ephemeral.
+  `refreshAndRegister` merges the live list with the persisted cache through
+  `mergeCatalogue` (ladder: live evidence beats persisted; the persisted (value, source)
+  fills models the live list reports no window for — e.g. an unloaded router row) and persists
+  the merged catalogue when `catalogueChanged` (which also compares `contextWindowSource`)
+  says it is registration-relevant. `updateHealthCache` remains ephemeral.
+- **Cache migration (`modelCacheVersion`):** bumped to 3 for the provenance contract. On load,
+  every legacy file (missing marker or < 3) passes the v2 fabrication-removal rules, then every
+  bare `contextWindow` is re-stamped `observed` (values never changed) and orphan sources are
+  stripped. Current-marker files are trusted and never re-migrated.
 - **Lifecycle:** each fresh extension instance (startup /reload /new /resume /fork) runs the factory
   and preloads from `crossbar.json`. `session_start` → load `crossbar.json` (+ `settings`) → live
   refresh/register of enabled + auto-discovery → widget + poll (UI). `session_shutdown` → stop poll,
@@ -206,6 +220,9 @@ One parameterized suite (`run-conformance.ts`) runs against **every** adapter us
 
 - fingerprint: positive, negative (other backend's response), ambiguous-port disambiguation.
 - listModels: normal, empty, embeddings filtered, missing-caps defaults applied.
+- window provenance: every model's `contextWindow` set iff `contextWindowSource` is set
+  (with a numeric `contextWindowAt`); `toPiModel` passes a known window through unchanged and
+  emits `UNKNOWN_CONTEXT_WINDOW` (8192) exactly when the descriptor has none.
 - introspectLoaded / switchModel / loadUnload: present ⇔ capability; success + edge cases —
   **auth failure (401), server-down-mid-switch, model-not-loaded, streaming cutoff**.
 - toPiModel: output validates against Pi's `ProviderConfig["models"]` element shape (compile + runtime).

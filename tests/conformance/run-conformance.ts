@@ -21,6 +21,7 @@ import {
   canSwitch,
   supports,
 } from "../../src/core/backend-adapter.ts";
+import { UNKNOWN_CONTEXT_WINDOW } from "../../src/core/window-provenance.ts";
 import type { DiscoveredServer } from "../../src/core/types.ts";
 
 import { createFakeProbe } from "./fake-probe.ts";
@@ -273,7 +274,39 @@ function describeAdapter(fixture: AdapterFixture): void {
       });
     }
 
-    // 10. autoLoadsOnDemand (when capability present)
+    // 10b. WINDOW PROVENANCE (contract v5)
+    describe("window provenance", () => {
+      it("pairs contextWindow with a source for every model — never an unlabelled number", async () => {
+        const models = await adapter.listModels(resolveServer(fixture), cred, createFakeProbe(routes as RouteMap));
+        expect(models.length).toBeGreaterThan(0);
+        for (const m of models) {
+          const hasWindow =
+            typeof m.contextWindow === "number" &&
+            Number.isSafeInteger(m.contextWindow) &&
+            m.contextWindow > 0;
+          const hasSource =
+            m.contextWindowSource === "declared" || m.contextWindowSource === "observed";
+          expect(hasWindow, `${m.id}: contextWindow must be set iff contextWindowSource is set`).toBe(hasSource);
+          if (hasWindow) {
+            expect(typeof m.contextWindowAt, `${m.id}: a paired window must carry contextWindowAt`).toBe("number");
+          }
+        }
+      });
+
+      it("toPiModel passes a known window through and emits UNKNOWN_CONTEXT_WINDOW only for unknown windows", async () => {
+        const models = await adapter.listModels(resolveServer(fixture), cred, createFakeProbe(routes as RouteMap));
+        for (const m of models.filter((x) => !x.embeddings)) {
+          const entry = adapter.toPiModel(resolveServer(fixture), m);
+          if (typeof m.contextWindow === "number" && m.contextWindow > 0) {
+            expect(entry.contextWindow, `${m.id}: known window must pass through unchanged`).toBe(m.contextWindow);
+          } else {
+            expect(entry.contextWindow, `${m.id}: unknown window must get the uniform fallback`).toBe(UNKNOWN_CONTEXT_WINDOW);
+          }
+        }
+      });
+    });
+
+    // 11. autoLoadsOnDemand (when capability present)
     if (supports(adapter, Capability.AutoLoadStatus)) {
       describe("autoLoadsOnDemand", () => {
         it("returns the fixture's expected answer on the success path", async () => {

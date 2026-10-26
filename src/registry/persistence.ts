@@ -49,7 +49,14 @@ function stripSecrets(record: ServerRecord): ServerRecord {
   return safe;
 }
 
-const MODEL_CACHE_VERSION = 2 as const;
+/**
+ * Bumped to 3 for the window-provenance contract: on load, every legacy
+ * cache (missing marker or < 3) passes through the v2 fabrication-removal rules and
+ * then gets every bare `contextWindow` re-stamped `observed` — the best value the last
+ * live list could report, now labelled with their source instead of left unlabelled. Values
+ * are never changed by the migration.
+ */
+export const MODEL_CACHE_VERSION = 3 as const;
 
 /** Backends whose cached model entries may contain a fabricated 8192/4096 context pair. */
 const FABRICATED_CONTEXT_KINDS = new Set<ServerRecord["kind"]>([
@@ -78,16 +85,45 @@ function sanitizeLegacyModel(model: ModelDescriptor, kind: ServerRecord["kind"])
   return sanitized;
 }
 
-function sanitizeLegacyModelCache(record: ServerRecord): ServerRecord {
-  if (!FABRICATED_CONTEXT_KINDS.has(record.kind) || !Array.isArray(record.lastKnownModels)) {
-    return record;
+/**
+ * v3 stamp: a bare legacy `contextWindow` (no source) becomes `(value, observed)`;
+ * a source without a usable window is stripped (the pairing invariant must hold after
+ * migration). Values are never changed.
+ */
+function stampProvenance(model: ModelDescriptor): ModelDescriptor {
+  const hasWindow =
+    typeof model.contextWindow === "number" &&
+    Number.isSafeInteger(model.contextWindow) &&
+    model.contextWindow > 0;
+  const hasSource =
+    model.contextWindowSource === "declared" || model.contextWindowSource === "observed";
+
+  if (hasWindow && hasSource) return model;
+  if (!hasWindow && !hasSource) return model;
+
+  const out = { ...model };
+  if (hasWindow && !hasSource) {
+    out.contextWindowSource = "observed";
+  } else {
+    // Source without a usable window — drop the orphan label (and timestamp).
+    delete out.contextWindowSource;
+    delete out.contextWindowAt;
   }
+  return out;
+}
+
+/**
+ * Migrate one legacy server record: v2 fabrication removal first (kind-scoped), then the
+ * v3 provenance stamp (every kind). Applied only when the file's marker is missing/legacy.
+ */
+function migrateLegacyModelCache(record: ServerRecord): ServerRecord {
+  if (!Array.isArray(record.lastKnownModels)) return record;
 
   return {
     ...record,
     lastKnownModels: record.lastKnownModels.map((model) =>
       typeof model === "object" && model !== null
-        ? sanitizeLegacyModel(model, record.kind)
+        ? stampProvenance(sanitizeLegacyModel(model, record.kind))
         : model,
     ),
   };
@@ -110,7 +146,7 @@ function parseConfigFile(raw: unknown): CrossbarConfigFile | null {
   const result: CrossbarConfigFile = {
     version: 1,
     modelCacheVersion: MODEL_CACHE_VERSION,
-    servers: isLegacyModelCache ? servers.map(sanitizeLegacyModelCache) : servers,
+    servers: isLegacyModelCache ? servers.map(migrateLegacyModelCache) : servers,
   };
   const rawSettings = obj["settings"];
   if (typeof rawSettings === "object" && rawSettings !== null) {

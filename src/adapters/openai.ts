@@ -18,6 +18,7 @@
 
 import { Capability } from "../core/capability.ts";
 import type { BackendAdapter, PiApiType } from "../core/backend-adapter.ts";
+import { piContextWindow } from "../core/window-provenance.ts";
 import type {
   DiscoveredServer,
   ModelDescriptor,
@@ -40,8 +41,7 @@ interface OpenAiModelsResponse {
 
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 
-/** Conservative defaults for ids not matched by the static table. */
-const DEFAULT_CONTEXT_WINDOW = 128_000;
+/** Conservative maxTokens default for ids not matched by the static table. */
 const DEFAULT_MAX_TOKENS = 4096;
 
 /** Static per-family caps, keyed by an id-prefix matcher. First match wins. */
@@ -91,18 +91,17 @@ const STATIC_TABLE: StaticRule[] = [
   },
 ];
 
-/** Look up static caps for an id, falling back to conservative defaults. */
-function lookupCaps(id: string): StaticCaps {
+/**
+ * Look up static (provider-DECLARED) caps for an id. Unknown ids get NO caps —
+ * in particular no fabricated context window; the window stays unknown and
+ * `toPiModel` applies the uniform boundary fallback.
+ */
+function lookupCaps(id: string): StaticCaps | null {
   const lower = id.toLowerCase();
   for (const rule of STATIC_TABLE) {
     if (rule.match(lower)) return rule.caps;
   }
-  return {
-    contextWindow: DEFAULT_CONTEXT_WINDOW,
-    maxTokens: DEFAULT_MAX_TOKENS,
-    input: ["text"],
-    reasoning: false,
-  };
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -150,20 +149,26 @@ class OpenAiAdapter implements BackendAdapter {
       .map((m) => this._describe(m.id));
   }
 
-  /** Build a ModelDescriptor from a bare id + static caps. */
+  /** Build a ModelDescriptor from a bare id + static (declared) caps. */
   private _describe(id: string): ModelDescriptor {
     const isEmbedding = id.toLowerCase().startsWith("text-embedding");
     const caps = lookupCaps(id);
-    return {
+    const descriptor: ModelDescriptor = {
       id,
       name: id,
-      contextWindow: caps.contextWindow,
-      maxTokens: caps.maxTokens,
-      input: caps.input,
-      reasoning: caps.reasoning,
+      maxTokens: caps?.maxTokens ?? DEFAULT_MAX_TOKENS,
+      input: caps?.input ?? ["text"],
+      reasoning: caps?.reasoning ?? false,
       tools: !isEmbedding,
       embeddings: isEmbedding,
     };
+    if (caps) {
+      // The provider's per-model table is a DECLARED context — what the API commits to.
+      descriptor.contextWindow = caps.contextWindow;
+      descriptor.contextWindowSource = "declared";
+      descriptor.contextWindowAt = Date.now();
+    }
+    return descriptor;
   }
 
   // --- toPiModel ------------------------------------------------------------
@@ -176,7 +181,7 @@ class OpenAiAdapter implements BackendAdapter {
       input: model.input.length > 0 ? model.input : ["text"],
       // Crossbar does not bill — costs are always zero.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      contextWindow: piContextWindow(model),
       maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS,
     };
   }

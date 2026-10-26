@@ -22,6 +22,7 @@
 
 import { Capability } from "../core/capability.ts";
 import type { BackendAdapter, PiApiType } from "../core/backend-adapter.ts";
+import { piContextWindow } from "../core/window-provenance.ts";
 import type {
   DiscoveredServer,
   HealthStatus,
@@ -131,17 +132,22 @@ function toDescriptor(m: LmsModelEntry): ModelDescriptor {
   // Context window: LM Studio reports both the model ceiling (`max_context_length`)
   // and the window the model was actually loaded with (`loaded_context_length`),
   // which is frequently configured well below the ceiling (e.g. a 128k model loaded
-  // at 4096). Register the OPERATIVE window so Pi budgets against what the server
-  // will really accept: prefer the loaded length when the model is resident (and
-  // non-zero), otherwise fall back to the model max. `loaded_context_length` is 0 or
-  // absent while the model is not loaded, so it never masks the ceiling in that case.
-  const loadedCtx =
-    isLoaded && typeof m.loaded_context_length === "number" && m.loaded_context_length > 0
-      ? m.loaded_context_length
-      : undefined;
-  const ctx = loadedCtx ?? m.max_context_length;
-  if (ctx !== undefined) {
-    desc.contextWindow = ctx;
+  // at 4096). Only the operative window is reported — `loaded_context_length` while
+  // the model is resident (OBSERVED); the ceiling is a trained-style maximum the
+  // server will not serve at, so it is surfaced as informational `trainedMax`.
+  // Unloaded models report no window; the registry merge may still fill one
+  // from the persisted cache, and `toPiModel` applies the uniform boundary fallback.
+  if (
+    isLoaded &&
+    typeof m.loaded_context_length === "number" &&
+    m.loaded_context_length > 0
+  ) {
+    desc.contextWindow = m.loaded_context_length;
+    desc.contextWindowSource = "observed";
+    desc.contextWindowAt = Date.now();
+  }
+  if (typeof m.max_context_length === "number" && m.max_context_length > 0) {
+    desc.trainedMax = m.max_context_length;
   }
   return desc;
 }
@@ -361,7 +367,7 @@ class LmStudioAdapter implements BackendAdapter {
       // engine) caches matching prefixes automatically, so injecting Anthropic-style
       // `cache_control` markers would be wrong for this OpenAI-completions backend.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: model.contextWindow ?? 8192,
+      contextWindow: piContextWindow(model),
       maxTokens: model.maxTokens ?? 4096,
       compat: { supportsUsageInStreaming: true },
     };

@@ -20,6 +20,7 @@
 
 import { Capability } from "../core/capability.ts";
 import type { BackendAdapter, PiApiType } from "../core/backend-adapter.ts";
+import { piContextWindow } from "../core/window-provenance.ts";
 import type {
   DiscoveredServer,
   ModelDescriptor,
@@ -55,7 +56,6 @@ interface AnthropicModelsResponse {
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
 const ANTHROPIC_VERSION = "2023-06-01";
 
-const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 8192;
 
 /** Static fallback caps keyed by an id-prefix matcher, used when the API row
@@ -76,12 +76,17 @@ const STATIC_TABLE: StaticRule[] = [
   { match: (id) => id.startsWith("claude-3-haiku"), contextWindow: 200_000, maxTokens: 4096 },
 ];
 
-function staticFallback(id: string): { contextWindow: number; maxTokens: number } {
+/**
+ * Static (provider-DECLARED) fallback caps for an id. Unknown ids get NO context
+ * window — never a fabricated default; the window stays unknown and
+ * `toPiModel` applies the uniform boundary fallback.
+ */
+function staticFallback(id: string): { contextWindow: number; maxTokens: number } | null {
   const lower = id.toLowerCase();
   for (const rule of STATIC_TABLE) {
     if (rule.match(lower)) return { contextWindow: rule.contextWindow, maxTokens: rule.maxTokens };
   }
-  return { contextWindow: DEFAULT_CONTEXT_WINDOW, maxTokens: DEFAULT_MAX_TOKENS };
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,22 +148,25 @@ class AnthropicAdapter implements BackendAdapter {
     return headers;
   }
 
-  /** Map one API row → ModelDescriptor, reading caps with static fallback. */
+  /** Map one API row → ModelDescriptor, reading declared caps with static fallback. */
   private _describe(m: AnthropicModelRow): ModelDescriptor {
     const fallback = staticFallback(m.id);
+    // The API's per-model `max_input_tokens` is the provider's DECLARED window; the
+    // static table is the same kind of provider declaration for older rows.
     const contextWindow =
       typeof m.max_input_tokens === "number" && m.max_input_tokens > 0
         ? m.max_input_tokens
-        : fallback.contextWindow;
+        : fallback?.contextWindow;
     const maxTokens =
-      typeof m.max_tokens === "number" && m.max_tokens > 0 ? m.max_tokens : fallback.maxTokens;
+      typeof m.max_tokens === "number" && m.max_tokens > 0
+        ? m.max_tokens
+        : fallback?.maxTokens ?? DEFAULT_MAX_TOKENS;
     const hasImage = m.capabilities?.image_input === true;
     const hasThinking = m.capabilities?.thinking === true;
 
-    return {
+    const descriptor: ModelDescriptor = {
       id: m.id,
       name: m.display_name && m.display_name.length > 0 ? m.display_name : m.id,
-      contextWindow,
       maxTokens,
       input: hasImage ? ["text", "image"] : ["text"],
       reasoning: hasThinking,
@@ -166,6 +174,12 @@ class AnthropicAdapter implements BackendAdapter {
       embeddings: false,
       raw: m,
     };
+    if (contextWindow !== undefined) {
+      descriptor.contextWindow = contextWindow;
+      descriptor.contextWindowSource = "declared";
+      descriptor.contextWindowAt = Date.now();
+    }
+    return descriptor;
   }
 
   // --- toPiModel ------------------------------------------------------------
@@ -178,7 +192,7 @@ class AnthropicAdapter implements BackendAdapter {
       input: model.input.length > 0 ? model.input : ["text"],
       // Crossbar does not bill — costs are always zero.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      contextWindow: piContextWindow(model),
       maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS,
     };
   }

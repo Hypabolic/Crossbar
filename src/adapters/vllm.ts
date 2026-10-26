@@ -17,6 +17,7 @@
 
 import { Capability } from "../core/capability.ts";
 import type { BackendAdapter, PiApiType } from "../core/backend-adapter.ts";
+import { piContextWindow } from "../core/window-provenance.ts";
 import type {
   DiscoveredServer,
   HealthStatus,
@@ -50,7 +51,6 @@ interface VllmModelsResponse {
 // Constants
 // ---------------------------------------------------------------------------
 
-const DEFAULT_CONTEXT_WINDOW = 8192;
 const DEFAULT_MAX_TOKENS = 4096;
 
 // ---------------------------------------------------------------------------
@@ -156,16 +156,28 @@ class VllmAdapter implements BackendAdapter {
     const rawModels = body?.data ?? [];
 
     return rawModels.map((m): ModelDescriptor => {
-      return {
+      // `max_model_len` is the server's runtime context cap (OBSERVED) — the window
+      // vLLM actually serves. When the card omits it, the window is UNKNOWN (no
+      // fabricated default); `toPiModel` applies the uniform boundary fallback.
+      const descriptor: ModelDescriptor = {
         id: m.id,
         name: m.id,
-        contextWindow: typeof m.max_model_len === "number" ? m.max_model_len : DEFAULT_CONTEXT_WINDOW,
         maxTokens: DEFAULT_MAX_TOKENS,
         input: ["text"],
         reasoning: false,
         embeddings: false,
         raw: m,
       };
+      if (
+        typeof m.max_model_len === "number" &&
+        Number.isSafeInteger(m.max_model_len) &&
+        m.max_model_len > 0
+      ) {
+        descriptor.contextWindow = m.max_model_len;
+        descriptor.contextWindowSource = "observed";
+        descriptor.contextWindowAt = Date.now();
+      }
+      return descriptor;
     });
   }
 
@@ -183,7 +195,7 @@ class VllmAdapter implements BackendAdapter {
       // reports cached tokens from its automatic prefix cache; keep streaming usage
       // reporting on so those hits are recorded.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      contextWindow: piContextWindow(model),
       maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS,
       compat: { supportsUsageInStreaming: true },
     };
