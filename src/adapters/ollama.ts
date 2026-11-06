@@ -14,6 +14,7 @@
  */
 
 import { Capability } from "../core/capability.ts";
+import { deriveReasoningInfo } from "../core/reasoning.ts";
 import type { BackendAdapter, PiApiType } from "../core/backend-adapter.ts";
 import type {
   DiscoveredServer,
@@ -196,13 +197,31 @@ class OllamaAdapter implements BackendAdapter {
         }
       }
 
+      const modelInfo = (show.model_info ?? {}) as Record<string, unknown>;
+      const rawName =
+        (typeof modelInfo.name === "string" && modelInfo.name.trim()) ||
+        (typeof modelInfo.display_name === "string" && modelInfo.display_name.trim()) ||
+        modelId;
+      const chatTemplate =
+        typeof show.template === "string"
+          ? show.template
+          : typeof modelInfo.template === "string"
+            ? (modelInfo.template as string)
+            : typeof modelInfo.chat_template === "string"
+              ? (modelInfo.chat_template as string)
+              : undefined;
+      const reasoningInfo = deriveReasoningInfo(show.model_info ?? show, chatTemplate);
+      const reasoning = reasoningInfo.reasoning || hasThinking;
+      const thinkingLevelMap = reasoningInfo.thinkingLevelMap;
+
       return {
         id: modelId,
-        name: modelId,
+        name: rawName,
         contextWindow,
         maxTokens: DEFAULT_MAX_TOKENS,
         input: hasVision ? ["text", "image"] : ["text"],
-        reasoning: hasThinking,
+        reasoning,
+        thinkingLevelMap,
         tools: hasTools,
         embeddings: isEmbedding,
         raw: show,
@@ -319,15 +338,27 @@ class OllamaAdapter implements BackendAdapter {
       id: model.id,
       name: model.name,
       reasoning: model.reasoning ?? false,
+      thinkingLevelMap: model.thinkingLevelMap,
       input: model.input.length > 0 ? model.input : ["text"],
-      // Local inference is free → per-token costs are zero, but cache-hit token
+      // Local inference is free -> per-token costs are zero, but cache-hit token
       // COUNTS still matter: Pi maps the backend's `usage.prompt_tokens_details
       // .cached_tokens` to `Usage.cacheRead` and displays it regardless of cost. Keep
       // streaming usage reporting on so those prompt-cache hits are recorded.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
       maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS,
-      compat: { supportsUsageInStreaming: true },
+      compat: {
+        supportsUsageInStreaming: true,
+        ...(model.reasoning && {
+          supportsReasoningEffort: Boolean(
+            !model.thinkingLevelMap ||
+              model.thinkingLevelMap.low !== null ||
+              model.thinkingLevelMap.high !== null ||
+              model.thinkingLevelMap.minimal !== null,
+          ),
+          thinkingFormat: "openai",
+        }),
+      },
     };
   }
 

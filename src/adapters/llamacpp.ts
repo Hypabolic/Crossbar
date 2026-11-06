@@ -7,6 +7,7 @@
  */
 
 import { Capability } from "../core/capability.ts";
+import { deriveReasoningInfo } from "../core/reasoning.ts";
 import type { BackendAdapter, PiApiType } from "../core/backend-adapter.ts";
 import type {
   DiscoveredServer,
@@ -245,11 +246,39 @@ class LlamacppAdapter implements BackendAdapter {
         positiveIntegerArg(entry.status?.args, ["-n", "--predict", "--n-predict"]),
         propsMaxTokens,
       );
+      const rawName =
+        (typeof (entry as any).name === "string" && (entry as any).name.trim()) ||
+        (typeof (entry as any).display_name === "string" && (entry as any).display_name.trim()) ||
+        (entry.meta as any)?.name ||
+        entry.id;
+      const chatTemplate =
+        typeof (props as any)?.chat_template === "string"
+          ? (props as any).chat_template
+          : typeof (props as any)?.default_generation_settings?.chat_template === "string"
+            ? (props as any).default_generation_settings.chat_template
+            : typeof (props as any)?.model_info?.chat_template === "string"
+              ? (props as any).model_info.chat_template
+              : typeof (entry as any)?.chat_template === "string"
+                ? (entry as any).chat_template
+                : undefined;
+      const reasoningInfo = deriveReasoningInfo(entry, chatTemplate);
+      const reasoning = reasoningInfo.reasoning || Boolean(
+        (entry as any).reasoning ||
+        (entry as any).supports_reasoning ||
+        (entry as any).supports_thinking ||
+        (entry as any).capabilities?.reasoning ||
+        (entry as any).capabilities?.thinking ||
+        ((entry as any).thinking && typeof (entry as any).thinking === "object") ||
+        (props?.default_generation_settings?.params as any)?.reasoning_format != null ||
+        (props?.default_generation_settings as any)?.reasoning
+      );
+      const thinkingLevelMap = reasoningInfo.thinkingLevelMap;
       const descriptor: ModelDescriptor = {
         id: entry.id,
-        name: entry.id,
+        name: rawName,
         input: hasVision ? ["text", "image"] : ["text"],
-        reasoning: false,
+        reasoning,
+        thinkingLevelMap,
       };
       if (contextWindow !== undefined) descriptor.contextWindow = contextWindow;
       if (maxTokens !== undefined) descriptor.maxTokens = maxTokens;
@@ -311,15 +340,27 @@ class LlamacppAdapter implements BackendAdapter {
       id: model.id,
       name: model.name,
       reasoning: model.reasoning ?? false,
+      thinkingLevelMap: model.thinkingLevelMap,
       input: model.input.length > 0 ? model.input : ["text"],
-      // Local inference is free → per-token costs are zero, but cache-hit token
+      // Local inference is free -> per-token costs are zero, but cache-hit token
       // COUNTS still matter: Pi maps the backend's `usage.prompt_tokens_details
       // .cached_tokens` to `Usage.cacheRead` and displays it regardless of cost. Keep
       // streaming usage reporting on so those prompt-cache hits are recorded.
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: positiveSafeInteger(model.contextWindow) ?? 128_000,
       maxTokens: positiveSafeInteger(model.maxTokens) ?? 0,
-      compat: { supportsUsageInStreaming: true },
+      compat: {
+        supportsUsageInStreaming: true,
+        ...(model.reasoning && {
+          supportsReasoningEffort: Boolean(
+            !model.thinkingLevelMap ||
+              model.thinkingLevelMap.low !== null ||
+              model.thinkingLevelMap.high !== null ||
+              model.thinkingLevelMap.minimal !== null,
+          ),
+          thinkingFormat: "openai",
+        }),
+      },
     };
   }
 

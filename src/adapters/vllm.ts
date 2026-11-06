@@ -16,6 +16,7 @@
  */
 
 import { Capability } from "../core/capability.ts";
+import { deriveReasoningInfo } from "../core/reasoning.ts";
 import type { BackendAdapter, PiApiType } from "../core/backend-adapter.ts";
 import type {
   DiscoveredServer,
@@ -156,13 +157,28 @@ class VllmAdapter implements BackendAdapter {
     const rawModels = body?.data ?? [];
 
     return rawModels.map((m): ModelDescriptor => {
+      const rawName =
+        (typeof (m as any).name === "string" && (m as any).name.trim()) ||
+        (typeof (m as any).display_name === "string" && (m as any).display_name.trim()) ||
+        m.id;
+      const reasoningInfo = deriveReasoningInfo(m);
+      const reasoning = reasoningInfo.reasoning || Boolean(
+        (m as any).reasoning ||
+        (m as any).supports_reasoning ||
+        (m as any).supports_thinking ||
+        (m as any).capabilities?.reasoning ||
+        (m as any).capabilities?.thinking ||
+        ((m as any).thinking && typeof (m as any).thinking === "object")
+      );
+      const thinkingLevelMap = reasoningInfo.thinkingLevelMap;
       return {
         id: m.id,
-        name: m.id,
+        name: rawName,
         contextWindow: typeof m.max_model_len === "number" ? m.max_model_len : DEFAULT_CONTEXT_WINDOW,
         maxTokens: DEFAULT_MAX_TOKENS,
         input: ["text"],
-        reasoning: false,
+        reasoning,
+        thinkingLevelMap,
         embeddings: false,
         raw: m,
       };
@@ -176,8 +192,9 @@ class VllmAdapter implements BackendAdapter {
       id: model.id,
       name: model.name,
       reasoning: model.reasoning ?? false,
+      thinkingLevelMap: model.thinkingLevelMap,
       input: model.input.length > 0 ? model.input : ["text"],
-      // Local inference is free → per-token costs are zero, but cache-hit token
+      // Local inference is free -> per-token costs are zero, but cache-hit token
       // COUNTS still matter: Pi maps the backend's `usage.prompt_tokens_details
       // .cached_tokens` to `Usage.cacheRead` and displays it regardless of cost. vLLM
       // reports cached tokens from its automatic prefix cache; keep streaming usage
@@ -185,7 +202,18 @@ class VllmAdapter implements BackendAdapter {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
       maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS,
-      compat: { supportsUsageInStreaming: true },
+      compat: {
+        supportsUsageInStreaming: true,
+        ...(model.reasoning && {
+          supportsReasoningEffort: Boolean(
+            !model.thinkingLevelMap ||
+              model.thinkingLevelMap.low !== null ||
+              model.thinkingLevelMap.high !== null ||
+              model.thinkingLevelMap.minimal !== null,
+          ),
+          thinkingFormat: "openai",
+        }),
+      },
     };
   }
 

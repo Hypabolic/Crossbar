@@ -18,7 +18,7 @@ export {
   type PiApiType,
 } from "./backend-adapter.ts";
 
-export type {
+export {
   CrossbarConfigFile,
   CrossbarSettings,
   DiscoveredServer,
@@ -35,3 +35,5 @@ export type {
   ServerCredential,
   ServerRecord,
 } from "./types.ts";
+
+export { deriveReasoningInfo } from "./reasoning.ts";

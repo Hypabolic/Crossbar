@@ -14,6 +14,7 @@
  */
 
 import { Capability } from "../core/capability.ts";
+import { deriveReasoningInfo } from "../core/reasoning.ts";
 import type { BackendAdapter, PiApiType } from "../core/backend-adapter.ts";
 import type {
   DiscoveredServer,
@@ -114,12 +115,30 @@ class GenericAdapter implements BackendAdapter {
 
     interface GenericModelEntry {
       id?: unknown;
+      name?: string;
+      display_name?: string;
       max_completion_tokens?: number;
       max_model_len?: number;
       context_length?: number;
       max_context_length?: number;
       max_context_window?: number;
       context_window?: number;
+      reasoning?: boolean;
+      supports_reasoning?: boolean;
+      supports_thinking?: boolean;
+      thinking?: unknown;
+      thinkingLevelMap?: Record<string, string | null>;
+      thinking_level_map?: Record<string, string | null>;
+      capabilities?: {
+        reasoning?: boolean;
+        thinking?: boolean;
+        tools?: boolean;
+        vision?: boolean;
+      };
+      input?: ("text" | "image")[];
+      architecture?: {
+        input_modalities?: ("text" | "image")[];
+      };
     }
     interface GenericModelEntryWithId extends GenericModelEntry {
       id: string;
@@ -158,13 +177,38 @@ class GenericAdapter implements BackendAdapter {
             ? item.max_completion_tokens
             : Math.floor(finalContextWindow / 2);
         
+        const rawName =
+          (typeof item.name === "string" && item.name.trim()) ||
+          (typeof item.display_name === "string" && item.display_name.trim()) ||
+          item.id;
+        const reasoningInfo = deriveReasoningInfo(item);
+        const reasoning = reasoningInfo.reasoning || Boolean(
+          item.reasoning ||
+          item.supports_reasoning ||
+          item.supports_thinking ||
+          item.capabilities?.reasoning ||
+          item.capabilities?.thinking ||
+          (item.thinking && typeof item.thinking === "object")
+        );
+        const thinkingLevelMap = reasoningInfo.thinkingLevelMap;
+        const input =
+          Array.isArray(item.input) && item.input.length > 0
+            ? item.input
+            : Array.isArray(item.architecture?.input_modalities) && item.architecture.input_modalities.length > 0
+              ? item.architecture.input_modalities
+              : ["text"];
+        const tools =
+          item.capabilities?.tools ?? (item as any).supports_tools ?? !isEmbedding;
+
         return {
           id: item.id,
-          name: item.id,
+          name: rawName,
           contextWindow: finalContextWindow,
           maxTokens,
-          input: ["text"],
-          reasoning: false,
+          input,
+          reasoning,
+          thinkingLevelMap,
+          tools,
           embeddings: isEmbedding,
           raw: item,
         };
@@ -178,8 +222,9 @@ class GenericAdapter implements BackendAdapter {
       id: model.id,
       name: model.name,
       reasoning: model.reasoning ?? false,
+      thinkingLevelMap: model.thinkingLevelMap,
       input: model.input.length > 0 ? model.input : ["text"],
-      // Local inference is free → per-token costs are zero, but cache-hit token
+      // Local inference is free -> per-token costs are zero, but cache-hit token
       // COUNTS still matter: Pi maps any `usage.prompt_tokens_details.cached_tokens` the
       // backend reports to `Usage.cacheRead` and displays it regardless of cost. The
       // flag only asks for usage in streaming (never fabricates), so it is safe even for
@@ -187,7 +232,18 @@ class GenericAdapter implements BackendAdapter {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
       maxTokens: model.maxTokens ?? DEFAULT_MAX_TOKENS,
-      compat: { supportsUsageInStreaming: true },
+      compat: {
+        supportsUsageInStreaming: true,
+        ...(model.reasoning && {
+          supportsReasoningEffort: Boolean(
+            !model.thinkingLevelMap ||
+              model.thinkingLevelMap.low !== null ||
+              model.thinkingLevelMap.high !== null ||
+              model.thinkingLevelMap.minimal !== null,
+          ),
+          thinkingFormat: "openai",
+        }),
+      },
     };
   }
 

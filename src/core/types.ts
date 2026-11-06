@@ -123,6 +123,8 @@ export interface ModelDescriptor {
   input: ("text" | "image")[];
   /** Supports extended thinking / reasoning. */
   reasoning?: boolean;
+  /** Supported thinking levels mapped to provider levels for Pi. */
+  thinkingLevelMap?: Record<string, string | null>;
   /** Supports tool/function calling. */
   tools?: boolean;
   /** Is an embeddings model (excluded from chat model registration). */
